@@ -4,6 +4,9 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 
 > 当前版本为可运行的桌面原型/基础版本。任务管理、单位 CSV 导入、界面交互和本地归档清单已可用；真实邮件协议适配器和附件解析仍在后续迭代中接入。
 
+- GitHub 项目：<https://github.com/cwxsss/unigather>
+- v0.0.1 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.1>
+
 ## 功能概览
 
 - **任务中心**：创建、查看和删除材料收集任务；设置截止时间、主题关键词、轮询间隔和 AI 匹配开关。
