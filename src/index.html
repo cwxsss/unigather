@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071426" />
+    <title>UniGather · 材料收集系统</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">✦</span><span>UniGather</span></div>
+        <div class="brand-subtitle">材料收集系统</div>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="dashboard"><span>⌂</span>仪表盘</button>
+          <button class="nav-item" data-view="tasks"><span>✓</span>收集任务</button>
+          <button class="nav-item" data-view="companies"><span>▦</span>分子公司</button>
+          <button class="nav-item" data-view="mailboxes"><span>✉</span>邮箱配置</button>
+          <button class="nav-item" data-view="materials"><span>▱</span>材料归档</button>
+          <button class="nav-item" data-view="settings"><span>⚙</span>系统设置</button>
+        </nav>
+        <div class="sync-card sync-idle">
+          <div class="sync-dot"></div>
+          <div><strong>自动收件未启动</strong><small>配置邮箱并创建任务后启用</small></div>
+        </div>
+        <div class="sidebar-footer"><span class="avatar">总</span><div><strong>总部用户</strong><small>本机管理员</small></div><span class="more">•••</span></div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div><p class="eyebrow">工作总览 / 2026 年 8 月 9 日</p><h1 id="page-title">仪表盘</h1></div>
+          <div class="top-actions"><button class="ghost-button" id="sync-now">↻ 立即同步</button><button class="primary-button" id="new-task">＋ 新建任务</button></div>
+        </header>
+
+        <section class="view active" id="dashboard-view">
+          <div class="stats-grid">
+            <article class="stat-card"><div class="stat-icon cyan">✉</div><div><span>今日已处理邮件</span><strong>0</strong><small class="muted-stat">配置邮箱后开始统计</small></div><div class="sparkline cyan-line">— — — —</div></article>
+            <article class="stat-card"><div class="stat-icon teal">▱</div><div><span>已归档材料</span><strong>0</strong><small class="muted-stat">完成同步后开始统计</small></div><div class="sparkline teal-line">— — — —</div></article>
+            <article class="stat-card"><div class="stat-icon green">✓</div><div><span>已完成单位</span><strong>0 <b>/ 0</b></strong><small class="muted-stat">创建任务后开始统计</small></div><div class="sparkline green-line">— — — —</div></article>
+          </div>
+
+          <div class="section-heading"><div><p class="eyebrow">当前进行中</p><h2>任务进度</h2></div><button class="link-button" data-view="tasks">查看全部任务 →</button></div>
+          <div class="task-banner empty-task-banner" id="dashboard-task-banner"><div class="task-badge">＋</div><div class="task-info"><strong>还没有收集任务</strong><span>创建第一个任务后，单位反馈进度会显示在这里。</span></div><button class="ghost-button" data-open-task>创建任务</button></div>
+
+          <div class="content-grid">
+            <article class="panel feedback-panel"><div class="panel-heading"><div><p class="eyebrow">单位反馈情况</p><h2>反馈状态</h2></div><button class="filter-button" id="feedback-filter">全部　⌄</button></div><div class="feedback-empty"><span>◎</span><strong>暂无反馈数据</strong><p>导入单位清单并创建任务后，这里会显示反馈状态。</p></div></article>
+            <article class="panel mail-panel"><div class="panel-heading"><div><p class="eyebrow">最近收到</p><h2>邮件动态</h2></div><button class="link-button" data-view="materials">查看材料 →</button></div><div class="feedback-empty compact"><span>✉</span><strong>暂无邮件</strong><p>完成邮箱配置并同步后，最近收到的邮件会显示在这里。</p></div></article>
+          </div>
+        </section>
+
+        <section class="view" id="tasks-view"><div class="section-heading"><div><p class="eyebrow">任务中心</p><h2>收集任务</h2></div><button class="primary-button" id="new-task-2">＋ 新建任务</button></div><div class="task-list" id="task-list"></div></section>
+        <section class="view" id="companies-view"><div class="section-heading"><div><p class="eyebrow">单位清单</p><h2>分子公司</h2></div><div class="section-actions"><input id="company-file" type="file" accept=".csv,.xlsx,.xls" hidden /><button class="primary-button" id="import-companies" type="button">⇧ 导入 Excel</button><button class="ghost-button" id="download-company-template" type="button">下载模板</button></div></div><div class="panel placeholder-panel" id="company-empty-state"><span>▦</span><h3>暂无单位清单</h3><p>导入 Excel 或 CSV 后，可在任务中选择单位并匹配反馈邮箱。</p></div></section>
+        <section class="view" id="mailboxes-view">
+  <div class="section-heading mailbox-heading">
+    <div><p class="eyebrow">连接管理 / 本机安全存储</p><h2>邮箱配置</h2><p class="page-help">配置一个用于自动收件的邮箱，密码由 Windows 凭据管理器保护。</p></div>
+    <button class="primary-button" id="add-mailbox">＋ 添加邮箱</button>
+  </div>
+
+  <div class="mailbox-page-layout">
+    <div class="mailbox-main-column">
+      <div class="mailbox-card panel mailbox-summary-card">
+        <div class="mailbox-icon">✉</div>
+        <div class="mailbox-summary-copy"><div class="summary-title-row"><strong>总部收件箱</strong><span class="connection-pill muted-connection"><i></i>尚未测试</span></div><span>填写服务器和账号后测试连接</span><small>密码不会显示在页面，也不会写入 SQLite。</small></div>
+        <button class="ghost-button summary-edit" type="button">编辑</button>
+      </div>
+
+      <form class="panel mailbox-form" id="mailbox-form" novalidate>
+        <div class="form-title"><div><p class="eyebrow">收件连接</p><h3>连接信息</h3></div><span class="secure-badge">▣ 本机加密</span></div>
+        <fieldset class="form-section">
+          <legend>基础信息</legend>
+          <div class="field full-field"><label for="mailbox-name">配置名称</label><input class="form-control" id="mailbox-name" value="总部收件箱" autocomplete="off" placeholder="例如：总部收件箱" /><small class="field-hint">用于在任务中区分不同收件账号。</small></div>
+          <div class="field full-field"><span class="field-label">收件协议</span><div class="segmented" role="radiogroup" aria-label="收件协议"><label><input type="radio" name="mailbox-protocol" value="IMAP" checked /><span>IMAP</span><small>保留服务器邮件</small></label><label><input type="radio" name="mailbox-protocol" value="POP3" /><span>POP3</span><small>下载到本机处理</small></label></div></div>
+          <div class="field server-field"><label for="mailbox-host">服务器地址</label><input class="form-control" id="mailbox-host" placeholder="imap.company.cn" autocomplete="url" autocapitalize="off" spellcheck="false" /><small class="field-hint">填写邮箱服务商提供的收件服务器域名。</small></div>
+          <div class="field port-field"><label for="mailbox-port">端口</label><input class="form-control" id="mailbox-port" type="number" inputmode="numeric" min="1" max="65535" value="993" autocomplete="off" /><small class="field-hint" id="port-hint">IMAP + SSL/TLS 通常为 993</small></div>
+          <div class="field full-field"><label for="mailbox-encryption">加密方式</label><select class="form-select" id="mailbox-encryption"><option>SSL/TLS</option><option>STARTTLS</option><option>无</option></select><small class="field-hint">优先使用 SSL/TLS；若服务商要求升级连接，再选择 STARTTLS。</small></div>
+        </fieldset>
+
+        <fieldset class="form-section">
+          <legend>账号安全</legend>
+          <div class="field full-field"><label for="mailbox-username">收件账号</label><input class="form-control" id="mailbox-username" type="email" placeholder="name@company.cn" autocomplete="username" autocapitalize="off" spellcheck="false" /><small class="field-hint">建议填写完整邮箱地址，便于服务器识别。</small></div>
+          <div class="field full-field"><label for="mailbox-password">账号密码</label><div class="input-with-action"><input class="form-control" id="mailbox-password" type="password" placeholder="输入邮箱密码或专用授权码" autocomplete="current-password" /><button class="input-action" id="toggle-mailbox-password" type="button" aria-label="显示密码" aria-pressed="false">显示</button></div><small class="field-hint">密码不会写入数据库或日志，仅交由 Windows 凭据管理器保存。</small></div>
+        </fieldset>
+
+        <fieldset class="form-section proxy-section">
+          <legend>代理设置 <span>可选</span></legend>
+          <label class="switch-row" for="mailbox-use-proxy"><span><strong>通过代理连接</strong><small>仅在公司网络需要代理时开启</small></span><input id="mailbox-use-proxy" type="checkbox" /><i class="switch-track"></i></label>
+          <div class="proxy-fields" id="proxy-fields" hidden>
+            <div class="field"><label for="mailbox-proxy-type">代理类型</label><select class="form-select" id="mailbox-proxy-type"><option value="http">HTTP</option><option value="socks5">SOCKS5</option></select></div>
+            <div class="field"><label for="mailbox-proxy-host">代理地址</label><input class="form-control" id="mailbox-proxy-host" placeholder="127.0.0.1" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <div class="field"><label for="mailbox-proxy-port">代理端口</label><input class="form-control" id="mailbox-proxy-port" type="number" inputmode="numeric" min="1" max="65535" value="7890" autocomplete="off" /></div>
+            <div class="field"><label for="mailbox-proxy-username">代理账号 <span>可选</span></label><input class="form-control" id="mailbox-proxy-username" placeholder="不需要可留空" autocomplete="off" /></div>
+            <div class="field full-field"><label for="mailbox-proxy-password">代理密码 <span>可选</span></label><input class="form-control" id="mailbox-proxy-password" type="password" placeholder="不需要可留空" autocomplete="off" /></div>
+          </div>
+        </fieldset>
+
+        <div class="connection-status" id="mailbox-status" data-state="idle" role="status" aria-live="polite"><i></i><div><strong>尚未测试连接</strong><span>保存前建议先测试一次，确认服务器和账号可以正常访问。</span></div></div>
+        <div class="settings-footer"><button class="ghost-button" id="mailbox-reset" type="button">重置</button><div><button class="ghost-button" id="mailbox-test" type="button">⌁ 测试连接</button><button class="primary-button" id="mailbox-save" type="submit">保存邮箱配置</button></div></div>
+      </form>
+    </div>
+    <aside class="mailbox-side-column"><div class="panel setup-guide"><p class="eyebrow">配置提示</p><h3>三步完成设置</h3><ol><li><b>01</b><span>填写服务器和端口<br /><em>IMAP 通常使用 993</em></span></li><li><b>02</b><span>输入账号与授权码<br /><em>部分邮箱需要单独开启 IMAP</em></span></li><li><b>03</b><span>测试连接并保存<br /><em>连接成功后即可用于自动收件</em></span></li></ol><div class="guide-note">⌁　遇到连接问题？请检查防火墙、代理和邮箱服务商的收件协议设置。</div></div></aside>
+  </div>
+</section>
+        <section class="view" id="materials-view"><div class="section-heading"><div><p class="eyebrow">本地归档</p><h2>材料归档</h2></div><button class="ghost-button" id="export-materials" type="button">导出清单 ↓</button></div><div class="panel placeholder-panel"><span>▱</span><h3>暂无归档材料</h3><p>同步邮件并确认归属后，附件会保存到任务指定目录。</p><button class="ghost-button" id="open-material-directory" type="button">打开归档目录</button></div></section>
+        <section class="view" id="settings-view"><div class="section-heading"><div><p class="eyebrow">本机偏好</p><h2>系统设置</h2></div></div><div class="panel settings-panel"><label class="setting-row"><span><strong>最小化到系统托盘</strong><small>关闭窗口时继续执行定时收件</small></span><input class="app-setting" data-setting="minimize_to_tray" type="checkbox" checked /></label><label class="setting-row"><span><strong>记住关闭时的选择</strong><small>下次关闭窗口不再重复询问</small></span><input class="app-setting" data-setting="remember_close_choice" type="checkbox" /></label><label class="setting-row"><span><strong>临期与逾期通知</strong><small>通过 Windows 通知提醒待反馈单位</small></span><input class="app-setting" data-setting="deadline_notifications" type="checkbox" checked /></label><div class="update-row"><div><strong>检查软件更新</strong><small>从 GitHub Release 检查最新版本，下载后运行安装包即可升级。</small></div><button class="ghost-button" id="check-updates" type="button">检查更新</button></div><div class="update-panel" id="update-panel" hidden></div></div></section>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <div class="modal-backdrop" id="task-modal" aria-hidden="true"><form class="modal" id="task-form" novalidate><button class="modal-close" type="button" data-close-modal>×</button><p class="eyebrow">新建收集任务</p><h2>配置任务规则</h2><label for="task-name">任务名称<input id="task-name" required placeholder="例如：2026 年第三季度经营材料收集" autocomplete="off" /></label><label for="task-subject-keywords">主题关键词<input id="task-subject-keywords" placeholder="多个关键词用逗号分隔" autocomplete="off" /><small class="modal-hint">用于匹配邮件主题，例如：季度材料,经营分析</small></label><div class="form-grid"><label for="task-deadline">截止时间<input id="task-deadline" type="datetime-local" required /></label><label for="task-poll-minutes">轮询间隔<select id="task-poll-minutes"><option value="30">每 30 分钟</option><option value="60">每 1 小时</option><option value="120">每 2 小时</option></select></label></div><label class="check-row"><input id="task-ai-enabled" type="checkbox" checked /> 启用 AI 辅助匹配（仅发送主题、正文和附件名称）</label><div class="modal-actions"><button class="ghost-button" type="button" data-close-modal>取消</button><button class="primary-button" id="save-task" type="submit">保存任务</button></div></form></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
