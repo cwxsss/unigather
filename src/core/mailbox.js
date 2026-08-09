@@ -33,3 +33,17 @@ export function buildMailboxPayload(values) {
     enabled: true,
   };
 }
+
+export function buildMailboxStorage(values) {
+  const payload = buildMailboxPayload(values);
+  const { proxy_url: proxyUrl, ...storagePayload } = payload;
+  return {
+    ...storagePayload,
+    proxyUrl,
+    useProxy: Boolean(values.useProxy),
+    proxyType: String(values.proxyType ?? 'http'),
+    proxyHost: String(values.proxyHost ?? '').trim(),
+    proxyPort: Number(values.proxyPort) || 0,
+    proxyUsername: String(values.proxyUsername ?? '').trim(),
+  };
+}

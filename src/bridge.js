@@ -1,10 +1,10 @@
 export async function invokeCommand(command, args = {}, fallback = null) {
+  let invoke;
   try {
-    if (!window.__TAURI_INTERNALS__) return fallback ? fallback() : null;
-    const { invoke } = await import('@tauri-apps/api/core');
-    return await invoke(command, args);
+    ({ invoke } = await import('@tauri-apps/api/core'));
   } catch (error) {
     if (fallback) return fallback(error);
     throw error;
   }
+  return invoke(command, args);
 }
