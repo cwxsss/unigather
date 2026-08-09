@@ -587,6 +587,32 @@ fn material_open(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let is_github_url = url.starts_with("https://github.com/")
+        || url.starts_with("https://githubusercontent.com/")
+        || url.starts_with("https://release-assets.githubusercontent.com/");
+    if !is_github_url {
+        return Err("仅允许打开 GitHub 下载地址".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&url)
+            .status()
+            .map_err(|error| format!("打开浏览器失败：{error}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "Windows 未能打开浏览器".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = url;
+        Err("当前平台不支持打开外部下载地址".to_string())
+    }
+}
+
+#[tauri::command]
 fn report_export(_task_id: String, _status: String) -> Result<String, String> {
     Ok("待反馈清单导出接口已就绪".to_string())
 }
@@ -710,6 +736,7 @@ pub fn run() {
             mail_list,
             match_resolve,
             material_open,
+            open_external_url,
             report_export,
             settings_update,
             settings_get,

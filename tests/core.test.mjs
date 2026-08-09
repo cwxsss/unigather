@@ -6,7 +6,7 @@ import { getFeedbackStatus } from '../src/core/status.js';
 import { classifyAttachment, buildAiPayload, decodeCsvBuffer, parseCompanyRows, parseCompanyMatrix } from '../src/core/attachments.js';
 import { mailboxDefaults, validateMailboxForm, buildMailboxPayload, buildMailboxStorage } from '../src/core/mailbox.js';
 import { splitKeywords, validateTaskInput, buildTaskInput, taskProgressPercent, taskStatusLabel } from '../src/core/tasks.js';
-import { normalizeVersion, isNewerVersion, pickInstallerAsset } from '../src/core/update.js';
+import { normalizeVersion, isNewerVersion, pickInstallerAsset, formatDownloadProgress } from '../src/core/update.js';
 import { DEFAULT_MATERIAL_PATH, normalizeMaterialPath } from '../src/core/materials.js';
 import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from '../src/core/inbox.js';
 import { defaultInboxStartTime, normalizeInboxStartTime } from '../src/core/sync.js';
@@ -187,4 +187,9 @@ test('compares release versions and selects a UniGather installer', () => {
   assert.equal(isNewerVersion('v0.2.0', '0.1.0'), true);
   assert.equal(isNewerVersion('0.1.0', '0.1.0'), false);
   assert.equal(pickInstallerAsset([{ name: 'notes.txt' }, { name: 'UniGather_0.2.0_x64-setup.exe', browser_download_url: 'https://example.com/app.exe' }]).name, 'UniGather_0.2.0_x64-setup.exe');
+});
+
+test('formats update download progress for known and unknown file sizes', () => {
+  assert.equal(formatDownloadProgress(512, 1024), '50%');
+  assert.equal(formatDownloadProgress(1536, 0), '1.5 KB');
 });

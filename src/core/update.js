@@ -14,3 +14,12 @@ export function isNewerVersion(latest, current) {
 export function pickInstallerAsset(assets = []) {
   return assets.find((asset) => /UniGather.*(setup\.exe|\.msi)$/i.test(asset?.name ?? '')) ?? null;
 }
+
+export function formatDownloadProgress(loaded = 0, total = 0) {
+  const current = Math.max(0, Number(loaded) || 0);
+  const size = Number(total) || 0;
+  if (size > 0) return `${Math.max(0, Math.min(100, Math.round((current / size) * 100)))}%`;
+  if (current < 1024) return `${current} B`;
+  if (current < 1024 * 1024) return `${(current / 1024).toFixed(1)} KB`;
+  return `${(current / (1024 * 1024)).toFixed(1)} MB`;
+}

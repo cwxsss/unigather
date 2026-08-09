@@ -5,6 +5,7 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 > 当前版本为 Windows 单机版，可配置邮箱并通过 IMAP/POP3 收件、归档附件和追踪单位反馈。
 
 - GitHub 项目：<https://github.com/cwxsss/unigather>
+- v0.0.3 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.3>
 - v0.0.2 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.2>
 - v0.0.1 历史发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.1>
 
@@ -35,8 +36,8 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 
 从 GitHub Release 下载以下任一安装包：
 
-- `UniGather_0.0.2_x64-setup.exe`：NSIS 安装包，适合普通用户。
-- `UniGather_0.0.2_x64_zh-CN.msi`：MSI 安装包，适合企业软件分发。
+- `UniGather_0.0.3_x64-setup.exe`：NSIS 安装包，适合普通用户。
+- `UniGather_0.0.3_x64_zh-CN.msi`：MSI 安装包，适合企业软件分发。
 
 发布版使用 Windows GUI 子系统启动，不会额外弹出黑色控制台窗口。
 

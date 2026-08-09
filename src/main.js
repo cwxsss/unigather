@@ -7,7 +7,7 @@ import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from '.
 import { normalizeInboxStartTime } from './core/sync.js';
 import { syncProgressLabel, syncProgressPercent } from './core/sync-progress.js';
 import { normalizeAiConfig, validateAiConfig } from './core/ai.js';
-import { isNewerVersion, pickInstallerAsset } from './core/update.js';
+import { formatDownloadProgress, isNewerVersion, pickInstallerAsset } from './core/update.js';
 import * as XLSX from 'xlsx';
 
 const navItems = document.querySelectorAll('.nav-item');
@@ -19,7 +19,7 @@ const TASK_STORAGE_KEY = 'unigather.tasks.v1';
 const MAILBOX_STORAGE_KEY = 'unigather.mailbox.v1';
 const MATERIAL_PATH_STORAGE_KEY = 'unigather.material-path.v1';
 const AI_CONFIG_STORAGE_KEY = 'unigather.ai-config.v1';
-const APP_VERSION = '0.0.2';
+const APP_VERSION = '0.0.3';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
 let companyRows = [];
@@ -671,13 +671,88 @@ async function checkForUpdates() {
       return;
     }
     const releaseUrl = safeGitHubUrl(release.html_url);
-    const installerUrl = safeGitHubUrl(installer?.browser_download_url) ?? releaseUrl;
-    panel.innerHTML = `<strong>发现新版本 ${escapeHtml(latest)}</strong><span>${escapeHtml(release.name ?? 'UniGather 新版本')}${release.published_at ? ` · ${new Date(release.published_at).toLocaleDateString('zh-CN')}` : ''}</span><p>${escapeHtml(String(release.body ?? '请查看 GitHub Release 说明。').slice(0, 260))}</p><div><a class="primary-button update-download" href="${installerUrl}" target="_blank" rel="noreferrer">下载并安装更新</a><a class="link-button" href="${releaseUrl}" target="_blank" rel="noreferrer">查看 Release</a></div>`;
+    const installerUrl = safeGitHubUrl(installer?.browser_download_url);
+    panel.innerHTML = `<strong>发现新版本 ${escapeHtml(latest)}</strong><span>${escapeHtml(release.name ?? 'UniGather 新版本')}${release.published_at ? ` · ${new Date(release.published_at).toLocaleDateString('zh-CN')}` : ''}</span><p>${escapeHtml(String(release.body ?? '请查看 GitHub Release 说明。').slice(0, 260))}</p><div class="update-panel-actions"><button class="primary-button update-download" id="download-update" type="button"${installerUrl ? '' : ' disabled'}>${installerUrl ? '下载并安装更新' : '暂无安装包'}</button><a class="link-button" href="${releaseUrl ?? '#'}" target="_blank" rel="noreferrer">查看 Release</a></div><div class="update-download-progress" id="update-download-progress" hidden><div class="update-progress-head"><strong id="update-progress-label">准备下载…</strong><span id="update-progress-value">0%</span></div><div class="update-progress-track"><i id="update-progress-bar"></i></div><small id="update-progress-hint">下载完成后，请退出当前软件并运行安装包。</small></div>`;
+    panel.querySelector('#download-update')?.addEventListener('click', () => void downloadInstaller(installerUrl, installer?.name));
     panel.hidden = false; notify(`发现新版本 ${latest}，可下载更新。`);
   } catch (error) {
     notify(`检查更新失败：${error.message ?? error}`, 'error');
   } finally {
     button.disabled = false; button.textContent = '检查更新';
+  }
+}
+
+async function downloadInstaller(url, fileName = 'UniGather-update.exe') {
+  const button = document.querySelector('#download-update');
+  const panel = document.querySelector('#update-download-progress');
+  const label = document.querySelector('#update-progress-label');
+  const value = document.querySelector('#update-progress-value');
+  const bar = document.querySelector('#update-progress-bar');
+  const hint = document.querySelector('#update-progress-hint');
+  if (!url || !button || !panel) return;
+  button.disabled = true;
+  button.textContent = '连接下载…';
+  panel.hidden = false;
+  if (label) label.textContent = '正在连接 GitHub…';
+  if (value) value.textContent = '0%';
+  if (bar) bar.style.width = '3%';
+  try {
+    const response = await fetch(url, { redirect: 'follow' });
+    if (!response.ok) throw new Error(`下载服务器返回 ${response.status}`);
+    const total = Number(response.headers.get('content-length')) || 0;
+    const reader = response.body?.getReader();
+    const chunks = [];
+    let loaded = 0;
+    if (reader) {
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        chunks.push(result.value);
+        loaded += result.value.byteLength;
+        const progress = formatDownloadProgress(loaded, total);
+        if (label) label.textContent = total ? '正在下载安装包…' : '正在下载安装包（大小未知）…';
+        if (value) value.textContent = progress;
+        if (bar) bar.style.width = total ? progress : '55%';
+      }
+    } else {
+      chunks.push(new Uint8Array(await response.arrayBuffer()));
+      loaded = chunks[0].byteLength;
+    }
+    const blob = new Blob(chunks, { type: response.headers.get('content-type') || 'application/octet-stream' });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = fileName || 'UniGather-update.exe';
+    link.style.display = 'none';
+    document.body.append(link);
+    link.click();
+    window.setTimeout(() => { URL.revokeObjectURL(objectUrl); link.remove(); }, 1000);
+    if (label) label.textContent = '安装包下载完成';
+    if (value) value.textContent = formatDownloadProgress(loaded, total);
+    if (bar) bar.style.width = '100%';
+    if (hint) hint.textContent = '安装包已保存到 Windows“下载”文件夹，请退出当前软件后双击安装。';
+    button.disabled = false;
+    button.textContent = '重新下载';
+    notify('安装包下载完成，请退出软件后运行安装包。');
+  } catch (error) {
+    try {
+      await invokeCommand('open_external_url', { url });
+      if (label) label.textContent = '已打开浏览器下载';
+      if (value) value.textContent = '外部下载';
+      if (bar) bar.style.width = '100%';
+      if (hint) hint.textContent = '当前网络不允许应用内下载，已打开浏览器下载页面；下载完成后请退出软件并运行安装包。';
+      button.disabled = false;
+      button.textContent = '重新下载';
+      notify('已打开浏览器下载页面，请完成下载后安装。');
+      return;
+    } catch { /* show the original error below */ }
+    if (label) label.textContent = '下载失败';
+    if (value) value.textContent = '失败';
+    if (bar) bar.style.width = '0%';
+    if (hint) hint.textContent = `原因：${error.message ?? error}。可点击“查看 Release”手动下载。`;
+    button.disabled = false;
+    button.textContent = '重试下载';
+    notify(`更新下载失败：${error.message ?? error}`, 'error');
   }
 }
 
@@ -688,8 +763,8 @@ function escapeHtml(value) {
 function safeGitHubUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && (url.hostname === 'github.com' || url.hostname.endsWith('.githubusercontent.com')) ? url.href : '#';
-  } catch { return '#'; }
+    return url.protocol === 'https:' && (url.hostname === 'github.com' || url.hostname.endsWith('.githubusercontent.com')) ? url.href : null;
+  } catch { return null; }
 }
 
 navItems.forEach((item) => item.addEventListener('click', () => showView(item.dataset.view)));
