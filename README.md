@@ -10,6 +10,7 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 - [Word 版使用手册](docs/UniGather-新手使用操作手册.docx)
 
 - GitHub 项目：<https://github.com/cwxsss/unigather>
+- v0.0.5 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.5>
 - v0.0.4 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.4>
 - v0.0.2 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.2>
 - v0.0.1 历史发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.1>
@@ -44,8 +45,8 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 
 从 GitHub Release 下载以下任一安装包：
 
-- `UniGather_0.0.4_x64-setup.exe`：NSIS 安装包，适合普通用户。
-- `UniGather_0.0.4_x64_zh-CN.msi`：MSI 安装包，适合企业软件分发。
+- `UniGather_0.0.5_x64-setup.exe`：NSIS 安装包，适合普通用户。
+- `UniGather_0.0.5_x64_zh-CN.msi`：MSI 安装包，适合企业软件分发。
 
 发布版使用 Windows GUI 子系统启动，不会额外弹出黑色控制台窗口。
 

@@ -6,7 +6,7 @@ import { buildAttachmentName } from '../src/core/filename.js';
 import { getFeedbackStatus } from '../src/core/status.js';
 import { classifyAttachment, buildAiPayload, decodeCsvBuffer, parseCompanyRows, parseCompanyMatrix } from '../src/core/attachments.js';
 import { mailboxDefaults, validateMailboxForm, validateMailboxSave, buildMailboxPayload, buildMailboxStorage } from '../src/core/mailbox.js';
-import { splitKeywords, validateTaskInput, buildTaskInput, taskProgressPercent, taskStatusLabel } from '../src/core/tasks.js';
+import { splitKeywords, validateTaskInput, buildTaskInput, taskProgressPercent, taskStatusLabel, normalizeFeedbackPage, nextFeedbackPage } from '../src/core/tasks.js';
 import { normalizeVersion, isNewerVersion, pickInstallerAsset, formatDownloadProgress } from '../src/core/update.js';
 import { DEFAULT_MATERIAL_PATH, normalizeMaterialPath } from '../src/core/materials.js';
 import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from '../src/core/inbox.js';
@@ -184,7 +184,7 @@ test('builds a normalized task payload from the create form', () => {
   });
   assert.deepEqual(buildTaskInput({ name: '补查任务', startTime: '2026-08-01T09:00', deadline: '2026-08-15T18:00' }).start_time, '2026-08-01T09:00');
   assert.equal(validateTaskInput({ name: '任务', startTime: '2026-08-16T09:00', deadline: '2026-08-15T18:00' }).startTime, '起始时间不能晚于截止时间');
-  assert.equal(taskStatusLabel('paused'), '已暂停');
+  assert.equal(taskStatusLabel('paused'), '已中断');
 });
 
 test('defaults the task material name to the task name and preserves a custom name', () => {
@@ -195,6 +195,12 @@ test('defaults the task material name to the task name and preserves a custom na
 test('calculates task progress for the task detail view', () => {
   assert.equal(taskProgressPercent({ total_companies: 10, confirmed_companies: 3 }), 30);
   assert.equal(taskProgressPercent({ total_companies: 0, confirmed_companies: 0 }), 0);
+});
+
+test('normalizes feedback paging and resets page on a filter change', () => {
+  assert.deepEqual(normalizeFeedbackPage({ page: 0, pageSize: 99, total: 51 }), { page: 1, pageSize: 20, pageCount: 3 });
+  assert.equal(nextFeedbackPage({ page: 3, pageCount: 3 }, 'next'), 3);
+  assert.equal(nextFeedbackPage({ page: 2, pageCount: 3 }, 'filter-change'), 1);
 });
 
 test('builds export rows for every task company that has not confirmed feedback', () => {
@@ -231,11 +237,24 @@ test('normalizes the global dashboard summary without mixing task progress', () 
 
 test('includes global dashboard, task feedback and material naming controls', () => {
   const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
-  for (const id of ['dashboard-collection-count', 'dashboard-send-batch-count', 'dashboard-received-today', 'dashboard-sent-today', 'dashboard-workspaces', 'dashboard-activity', 'task-summary-grid', 'task-feedback-select', 'task-feedback-panel', 'export-pending-companies', 'task-match-page-size', 'task-match-pagination', 'task-feedback-drilldown-modal', 'task-material-name']) {
+  for (const id of ['dashboard-collection-count', 'dashboard-send-batch-count', 'dashboard-received-today', 'dashboard-sent-today', 'dashboard-workspaces', 'dashboard-activity', 'task-summary-grid', 'task-completed-count', 'task-deleted-count', 'task-management-modal', 'task-management-list', 'task-feedback-select', 'task-feedback-panel', 'task-feedback-drilldown-modal', 'task-material-name']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /id="dashboard-task-banner"/);
+  assert.doesNotMatch(html, /id="export-pending-companies"/);
   const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.match(main, /task-feedback-result-filter/);
+  assert.match(main, /openFeedbackMessageInInbox/);
+  assert.match(main, /task_set_status/);
+  assert.match(main, /task_rename/);
+  assert.match(main, /deleteTask\(task, true\)/);
+  assert.match(main, /openTaskModal\(task\)/);
+  assert.match(html, /task-workbench-body/);
+  assert.doesNotMatch(html, /task-detail-mail-pane/);
+  assert.doesNotMatch(html, /id="task-match-list"/);
+  assert.match(html, /id="task-detail-company-list"/);
+  assert.match(html, /id="task-detail-body"/);
+  assert.match(html, /task-detail-rules-panel/);
   assert.match(main, /#new-task-2'\)\?\.addEventListener\('click', \(\) => openTaskModal\(\)\)/);
 });
 
@@ -439,7 +458,25 @@ test('provides an explicit label and detail for every send match status', () => 
   assert.equal(sendItemStatusMeta('ignored', '').label, '已忽略');
 });
 
-test('includes signature, send history detail and task match visibility controls in the desktop UI', () => {
+test('includes signature, send history detail and task rules visibility controls in the desktop UI', () => {
   const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
-  ['id="send-signature"', 'id="save-default-signature"', 'id="send-history-detail-modal"', 'id="task-match-list"', 'id="task-match-filter"'].forEach((marker) => assert.ok(html.includes(marker), marker));
+  ['id="send-signature"', 'id="save-default-signature"', 'id="send-history-detail-modal"', 'id="task-detail-company-list"', 'id="task-detail-body"'].forEach((marker) => assert.ok(html.includes(marker), marker));
+  assert.ok(!html.includes('id="task-match-list"'));
+});
+
+test('includes deleted task recovery, feedback paging and streamlined inbox controls', () => {
+  const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  ['task-deleted-count', 'task-delete-confirm-modal', 'confirm-task-delete'].forEach((id) => assert.match(html, new RegExp(`id="${id}"`)));
+  ['task-feedback-pagination', 'task-feedback-page-size', 'task_feedback_page'].forEach((marker) => assert.ok(main.includes(marker), marker));
+  assert.ok(html.indexOf('data-view="companies"') < html.indexOf('data-view="inbox"'));
+  assert.doesNotMatch(html, /id="refresh-inbox"/);
+});
+
+test('uses readable and compact task company picker rows', () => {
+  const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.task-picker-redesigned \.task-company-list\{[^}]*display:flex[^}]*flex-direction:column[^}]*justify-content:flex-start[^}]*gap:0/);
+  assert.match(css, /\.task-picker-redesigned \.task-company-option\{[^}]*flex:0 0 40px/);
+  assert.match(css, /\.task-picker-redesigned \.task-company-option strong\{[^}]*font-size:16px/);
+  assert.match(css, /\.task-picker-redesigned \.task-company-option small\{[^}]*font-size:14px/);
 });

@@ -36,11 +36,27 @@ export function buildTaskInput(values) {
 }
 
 export function taskStatusLabel(status) {
-  return { active: '进行中', paused: '已暂停', completed: '已完成' }[status] ?? '未开始';
+  return { active: '进行中', paused: '已中断', completed: '已完成', deleted: '已删除' }[status] ?? '未开始';
 }
 
 export function taskProgressPercent(task = {}) {
   const total = Number(task.total_companies) || 0;
   const confirmed = Math.max(0, Number(task.confirmed_companies) || 0);
   return total ? Math.min(100, Math.round((confirmed / total) * 100)) : 0;
+}
+
+export function normalizeFeedbackPage({ page, pageSize, total } = {}) {
+  const normalizedPageSize = [10, 20, 31, 40, 50].includes(Number(pageSize)) ? Number(pageSize) : 20;
+  const normalizedTotal = Math.max(0, Number(total) || 0);
+  const pageCount = Math.max(1, Math.ceil(normalizedTotal / normalizedPageSize));
+  return { page: Math.min(Math.max(1, Number(page) || 1), pageCount), pageSize: normalizedPageSize, pageCount };
+}
+
+export function nextFeedbackPage({ page, pageCount } = {}, action) {
+  const current = Math.max(1, Number(page) || 1);
+  const maximum = Math.max(1, Number(pageCount) || 1);
+  if (action === 'filter-change' || action === 'page-size-change') return 1;
+  if (action === 'next') return Math.min(maximum, current + 1);
+  if (action === 'previous') return Math.max(1, current - 1);
+  return current;
 }

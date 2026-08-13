@@ -1,6 +1,6 @@
 import { invokeCommand } from './bridge.js';
 import { buildMailboxPayload, buildMailboxStorage, mailboxDefaults, validateMailboxForm, validateMailboxSave } from './core/mailbox.js';
-import { buildTaskInput, taskStatusLabel, validateTaskInput } from './core/tasks.js';
+import { buildTaskInput, taskStatusLabel, validateTaskInput, normalizeFeedbackPage, nextFeedbackPage } from './core/tasks.js';
 import { decodeCsvBuffer, parseCompanyMatrix, parseCompanyRows } from './core/attachments.js';
 import { DEFAULT_MATERIAL_PATH, normalizeMaterialPath } from './core/materials.js';
 import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from './core/inbox.js';
@@ -31,6 +31,7 @@ const TASK_LAST_RECEIVE_STORAGE_KEY = 'unigather.task-last-receive.v1';
 const APP_VERSION = '0.0.4';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
+let deletedTasks = [];
 let companyRows = [];
 let companyOptions = [];
 let selectedCompanyIds = [];
@@ -43,7 +44,13 @@ let selectedTaskSummaryId = '';
 let pendingFeedbackCompanies = [];
 let taskMatchPage = 1;
 let taskMatchPageSize = 20;
+let taskManagementFilter = 'all';
 let taskFeedbackDetail = null;
+let taskFeedbackPage = 1;
+let taskFeedbackPageSize = 20;
+let taskFeedbackFilter = 'all';
+let taskFeedbackTaskId = '';
+let pendingDeleteTask = null;
 let materialNameManuallyEdited = false;
 let activeSyncRunId = '';
 let activeSyncTaskId = '';
@@ -120,8 +127,12 @@ function fallbackTaskSummary(input) {
 
 async function loadTasks() {
   const localTasks = readLocalTasks();
-  const result = await invokeCommand('task_list', {}, () => localTasks);
+  const [result, deletedResult] = await Promise.all([
+    invokeCommand('task_list', { includeDeleted: false }, () => localTasks),
+    invokeCommand('task_list', { includeDeleted: true }, () => []),
+  ]);
   tasks = Array.isArray(result) ? result : localTasks;
+  deletedTasks = Array.isArray(deletedResult) ? deletedResult : [];
   // Remove the two old demo records if they were saved by an earlier preview build.
   tasks = tasks.filter((task) => !['task-q3', 'task-audit'].includes(task.id) && !['2026 年第三季度经营材料收集', '审计整改闭环材料'].includes(task.name));
   writeLocalTasks();
@@ -148,8 +159,8 @@ function renderTasks() {
   const setText = (selector, value) => { const element = document.querySelector(selector); if (element) element.textContent = value; };
   setText('#task-total-count', tasks.length);
   setText('#task-active-count', tasks.filter((task) => task.status === 'active').length);
-  setText('#task-confirmed-count', selected?.confirmed_companies ?? 0);
-  setText('#task-pending-count', selected ? Math.max(0, Number(selected.total_companies || 0) - Number(selected.confirmed_companies || 0)) : 0);
+  setText('#task-completed-count', tasks.filter((task) => task.status === 'completed').length);
+  setText('#task-deleted-count', deletedTasks.length);
   const selector = document.querySelector('#task-feedback-select');
   if (selector) {
     selector.replaceChildren(...tasks.map((task) => { const option = document.createElement('option'); option.value = task.id; option.textContent = task.name; option.selected = task.id === selectedTaskSummaryId; return option; }));
@@ -162,7 +173,11 @@ function renderTasks() {
     if (feedback) feedback.innerHTML = '<div class="feedback-empty compact"><span>＋</span><strong>暂无任务</strong><p>创建任务后可查看单位反馈与匹配邮件。</p></div>';
     return;
   }
-  tasks.forEach((task, index) => {
+  const activeTasks = tasks.filter((task) => task.status === 'active');
+  if (!activeTasks.length) {
+    list.innerHTML = '<div class="panel empty-state compact"><span class="empty-state-icon">◎</span><h3>暂无进行中的任务</h3><p>可从上方任务管理入口恢复中断任务，或新建收集任务。</p></div>';
+  }
+  activeTasks.forEach((task, index) => {
     const row = document.createElement('article');
     row.className = 'task-list-row';
     row.dataset.taskId = task.id;
@@ -198,6 +213,99 @@ function renderTasks() {
   void renderTaskFeedbackPanel(selectedTaskSummaryId);
 }
 
+function taskManagementLabel(filter) {
+  return { all: '全部任务', active: '进行中的任务', completed: '已完成任务', deleted: '已删除任务' }[filter] ?? '任务管理';
+}
+
+function filteredManagedTasks(filter) {
+  if (filter === 'deleted') return deletedTasks;
+  return filter === 'all' ? tasks : tasks.filter((task) => task.status === filter);
+}
+
+function openTaskManagement(filter = 'all') {
+  const modal = document.querySelector('#task-management-modal');
+  if (!modal) return;
+  taskManagementFilter = filter;
+  const selector = modal.querySelector('#task-management-filter');
+  if (selector) selector.value = filter;
+  renderTaskManagement();
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeTaskManagement() {
+  const modal = document.querySelector('#task-management-modal');
+  modal?.classList.remove('open');
+  modal?.setAttribute('aria-hidden', 'true');
+}
+
+function renderTaskManagement() {
+  const modal = document.querySelector('#task-management-modal');
+  const list = modal?.querySelector('#task-management-list');
+  if (!modal || !list) return;
+  const visible = filteredManagedTasks(taskManagementFilter);
+  modal.querySelector('#task-management-title').textContent = taskManagementLabel(taskManagementFilter);
+  modal.querySelector('#task-management-count').textContent = `${visible.length} 个任务`;
+  list.replaceChildren();
+  if (!visible.length) { list.innerHTML = '<div class="send-empty">该状态下暂无任务。</div>'; return; }
+  visible.forEach((task) => {
+    const row = document.createElement('article');
+    row.className = 'task-management-row';
+    row.innerHTML = `<div><strong>${escapeHtml(task.name)}</strong><small>${task.status === 'deleted' ? `删除于 ${escapeHtml(formatDeadline(task.deleted_at))}` : `${taskStatusLabel(task.status)} · ${task.total_companies ?? 0} 家单位 · 截止 ${escapeHtml(formatDeadline(task.deadline))}`}</small></div><span class="status ${task.status === 'completed' ? 'completed' : task.status === 'paused' || task.status === 'deleted' ? 'overdue' : 'progress'}">${taskStatusLabel(task.status)}</span><div class="task-management-actions"></div>`;
+    const actions = row.querySelector('.task-management-actions');
+    if (task.status === 'deleted') {
+      const restore = document.createElement('button'); restore.type = 'button'; restore.className = 'primary-button'; restore.textContent = '恢复任务'; restore.addEventListener('click', () => void restoreTask(task));
+      actions.append(restore); list.append(row); return;
+    }
+    const detail = document.createElement('button'); detail.type = 'button'; detail.className = 'ghost-button'; detail.textContent = '查看详情'; detail.addEventListener('click', () => { closeTaskManagement(); openTaskDetail(task); });
+    const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'ghost-button'; edit.textContent = '编辑'; edit.addEventListener('click', () => { closeTaskManagement(); openTaskModal(task); });
+    const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'ghost-button'; rename.textContent = '重命名'; rename.addEventListener('click', () => void renameTask(task));
+    const run = document.createElement('button'); run.type = 'button'; run.className = 'ghost-button'; run.textContent = task.status === 'active' ? '立即运行' : '重新运行'; run.addEventListener('click', () => void rerunTask(task));
+    const state = document.createElement('button'); state.type = 'button'; state.className = 'ghost-button'; state.textContent = task.status === 'active' ? '停止任务' : task.status === 'completed' ? '恢复任务' : '恢复任务'; state.addEventListener('click', () => void setTaskState(task, task.status === 'active' ? 'paused' : 'active'));
+    const complete = document.createElement('button'); complete.type = 'button'; complete.className = 'ghost-button'; complete.textContent = '标记完成'; complete.disabled = task.status === 'completed'; complete.addEventListener('click', () => void setTaskState(task, 'completed'));
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'ghost-button danger-button'; remove.textContent = '删除'; remove.addEventListener('click', () => void deleteTask(task, true));
+    actions.append(detail, edit, rename, run, state, complete, remove); list.append(row);
+  });
+}
+
+async function restoreTask(task) {
+  try {
+    await invokeCommand('task_restore', { taskId: task.id });
+    await loadTasks();
+    renderTaskManagement();
+    notify('任务已恢复为已中断状态，可编辑后重新运行。');
+  } catch (error) { notify(`恢复任务失败：${error.message ?? error}`, 'error'); }
+}
+
+async function setTaskState(task, status) {
+  try {
+    await invokeCommand('task_set_status', { taskId: task.id, status });
+    await loadTasks(); renderTaskManagement();
+    notify(status === 'paused' ? '任务已中断，将不再自动收件。' : status === 'completed' ? '任务已标记为完成。' : '任务已恢复。');
+  } catch (error) { notify(`更新任务状态失败：${error.message ?? error}`, 'error'); }
+}
+
+async function rerunTask(task) {
+  try {
+    if (task.status !== 'active') await invokeCommand('task_set_status', { taskId: task.id, status: 'active' });
+    await loadTasks();
+    const updated = tasks.find((item) => item.id === task.id) ?? { ...task, status: 'active' };
+    await runTaskSync(updated, { manual: true });
+    renderTaskManagement();
+  } catch (error) { notify(`重新运行失败：${error.message ?? error}`, 'error'); }
+}
+
+async function renameTask(task) {
+  const name = window.prompt('请输入新的任务名称：', task.name);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) { notify('任务名称不能为空。', 'error'); return; }
+  try {
+    await invokeCommand('task_rename', { taskId: task.id, name: trimmed });
+    await loadTasks(); renderTaskManagement(); notify('任务名称已更新。');
+  } catch (error) { notify(`重命名失败：${error.message ?? error}`, 'error'); }
+}
+
 function createAttachmentActions(attachment) {
   const wrapper = document.createElement('span'); wrapper.className = 'attachment-actions';
   const name = document.createElement('small'); name.textContent = attachment.name || '未命名附件'; name.title = attachment.savedPath || '';
@@ -213,40 +321,46 @@ async function renderTaskFeedbackPanel(taskId) {
   const content = document.querySelector('#task-feedback-content');
   const task = tasks.find((item) => item.id === taskId);
   if (!content || !task) return;
+  if (taskFeedbackTaskId !== taskId) {
+    taskFeedbackTaskId = taskId;
+    taskFeedbackPage = 1;
+    taskFeedbackFilter = 'all';
+  }
   content.innerHTML = '<div class="send-empty">正在读取任务反馈…</div>';
   try {
-    const [detail, rawPendingCompanies] = await Promise.all([
+    const [detail, feedbackPage, rawPendingCompanies] = await Promise.all([
       invokeCommand('task_match_detail', { taskId }),
+      invokeCommand('task_feedback_page', { taskId, statusFilter: taskFeedbackFilter, page: taskFeedbackPage, pageSize: taskFeedbackPageSize }),
       invokeCommand('task_pending_companies', { taskId }),
     ]);
     if (selectedTaskSummaryId !== taskId) return;
     pendingFeedbackCompanies = normalizePendingFeedbackCompanies(rawPendingCompanies);
     taskFeedbackDetail = detail;
+    const normalizedPage = normalizeFeedbackPage(feedbackPage ?? {});
+    taskFeedbackPage = normalizedPage.page;
+    taskFeedbackPageSize = normalizedPage.pageSize;
     const pending = Math.max(0, Number(task.total_companies || 0) - Number(task.confirmed_companies || 0));
-    content.innerHTML = `<div class="task-feedback-stats"><button type="button" data-feedback-drilldown="confirmed"><span>已反馈单位</span><strong>${task.confirmed_companies ?? 0}</strong><small>查看明细 →</small></button><button type="button" data-feedback-drilldown="pending"><span>待反馈单位</span><strong>${pending}</strong><small>查看明细 →</small></button><button type="button" data-feedback-drilldown="needs_review"><span>待确认邮件</span><strong>${detail.needsReview ?? 0}</strong><small>查看邮件 →</small></button><button type="button" data-feedback-drilldown="unmatched"><span>未匹配邮件</span><strong>${detail.unmatched ?? 0}</strong><small>查看邮件 →</small></button></div><section class="pending-feedback-section"><div class="pending-feedback-head"><div><strong>待反馈单位明细</strong><small>含待反馈和待确认单位，可直接导出用于催办。</small></div><span>${pendingFeedbackCompanies.length} 家</span></div><div class="pending-feedback-table-wrap"><table class="pending-feedback-table"><thead><tr><th>单位</th><th>联系人</th><th>邮箱</th><th>电话</th><th>状态</th></tr></thead><tbody id="pending-feedback-list"></tbody></table></div></section><div class="task-feedback-mail-list"></div>`;
-    const pendingList = content.querySelector('#pending-feedback-list');
-    if (!pendingFeedbackCompanies.length) {
-      pendingList.innerHTML = '<tr><td colspan="5" class="pending-feedback-empty">所有单位均已确认反馈。</td></tr>';
-    } else {
-      pendingFeedbackCompanies.forEach((company) => {
-        const contacts = company.contacts ?? [];
-        const row = document.createElement('tr');
-        row.innerHTML = `<td><strong>${escapeHtml(company.companyName)}</strong></td><td>${escapeHtml(contacts.map((contact) => contact.contactName).filter(Boolean).join('、') || '—')}</td><td>${escapeHtml(contacts.map((contact) => contact.email).filter(Boolean).join('；') || '—')}</td><td>${escapeHtml(contacts.map((contact) => contact.phone).filter(Boolean).join('、') || '—')}</td><td><span class="send-state-chip ${company.feedbackStatus === 'needs_review' ? 'warning' : 'muted'}">${pendingFeedbackStatusLabel(company.feedbackStatus)}</span></td>`;
-        pendingList.append(row);
-      });
-    }
-    const list = content.querySelector('.task-feedback-mail-list');
-    const messages = detail.messages ?? [];
-    if (!messages.length) { list.innerHTML = '<div class="send-empty">尚未发现符合任务时间范围的邮件，可点击任务详情中的“立即刷新”。</div>'; return; }
+    content.innerHTML = `<div class="task-feedback-stats"><button type="button" data-feedback-drilldown="confirmed"><span>已反馈单位</span><strong>${task.confirmed_companies ?? 0}</strong><small>查看明细 →</small></button><button type="button" data-feedback-drilldown="pending"><span>待反馈单位</span><strong>${pending}</strong><small>查看明细 / 导出 →</small></button><button type="button" data-feedback-drilldown="needs_review"><span>待确认邮件</span><strong>${feedbackPage.needsReview ?? detail.needsReview ?? 0}</strong><small>查看明细 →</small></button><button type="button" data-feedback-drilldown="unmatched"><span>未匹配邮件</span><strong>${feedbackPage.unmatched ?? detail.unmatched ?? 0}</strong><small>查看明细 →</small></button></div><section class="task-feedback-results"><div class="pending-feedback-head"><div><strong>反馈情况</strong><small>显示本任务收取并完成匹配判断的邮件；可按结论筛选并直接打开收件箱详情。</small></div><div class="task-feedback-controls"><select id="task-feedback-result-filter" aria-label="筛选反馈情况"><option value="all">全部邮件</option><option value="confirmed">已匹配</option><option value="needs_review">待确认</option><option value="unmatched">未匹配</option></select><select id="task-feedback-page-size" aria-label="每页显示数量"><option value="10">10 条/页</option><option value="20">20 条/页</option><option value="31">31 条/页</option><option value="40">40 条/页</option><option value="50">50 条/页</option></select></div></div><div class="pending-feedback-table-wrap"><table class="pending-feedback-table task-feedback-result-table"><thead><tr><th>邮件主题</th><th>已识别单位</th><th>状态</th><th>匹配说明</th><th>操作</th></tr></thead><tbody id="task-feedback-result-list"></tbody></table></div><div class="task-feedback-pagination" id="task-feedback-pagination"></div></section>`;
+    const list = content.querySelector('#task-feedback-result-list');
+    const filterControl = content.querySelector('#task-feedback-result-filter');
+    const pageSizeControl = content.querySelector('#task-feedback-page-size');
+    filterControl.value = taskFeedbackFilter;
+    pageSizeControl.value = String(taskFeedbackPageSize);
+    const messages = feedbackPage.messages ?? [];
+    list.replaceChildren();
+    if (!messages.length) { list.innerHTML = '<tr><td colspan="5" class="pending-feedback-empty">当前筛选条件下没有邮件。</td></tr>'; }
     messages.forEach((message) => {
       const [label, tone] = taskMatchStatus(message.status);
-      const row = document.createElement('article'); row.className = 'task-feedback-mail';
-      row.innerHTML = `<div><strong>${escapeHtml(message.subject || '(无主题)')}</strong><small>${escapeHtml(message.sender)} · ${escapeHtml(formatDeadline(message.receivedAt))}</small></div><div><span>${escapeHtml(message.companyName || '未识别单位')}</span><small>${escapeHtml(taskMatchReason(message.reason))}</small></div><span class="send-state-chip ${tone}">${label}</span><div class="task-feedback-attachments"></div>`;
-      const attachments = row.querySelector('.task-feedback-attachments');
-      (message.attachments ?? []).forEach((attachment) => attachments.append(createAttachmentActions(attachment)));
-      if (!(message.attachments ?? []).length) attachments.textContent = '无附件';
+      const row = document.createElement('tr');
+      row.innerHTML = `<td><strong>${escapeHtml(message.subject || '(无主题)')}</strong><small>${escapeHtml(message.sender)} · ${escapeHtml(formatDeadline(message.receivedAt))}</small></td><td>${escapeHtml(message.companyName || '未识别单位')}</td><td><span class="send-state-chip ${tone}">${label}</span></td><td title="${escapeHtml(taskMatchReason(message.reason))}">${escapeHtml(taskMatchReason(message.reason))}</td><td><button class="link-button" type="button">查看邮件</button></td>`;
+      row.querySelector('button').addEventListener('click', () => openFeedbackMessageInInbox(message.messageId));
       list.append(row);
     });
+    const pager = content.querySelector('#task-feedback-pagination');
+    pager.innerHTML = feedbackPage.total ? `<span>第 ${taskFeedbackPage} / ${normalizedPage.pageCount} 页，共 ${feedbackPage.total} 封</span><button class="ghost-button" type="button" data-feedback-page="previous" ${taskFeedbackPage <= 1 ? 'disabled' : ''}>‹ 上一页</button><button class="ghost-button" type="button" data-feedback-page="next" ${taskFeedbackPage >= normalizedPage.pageCount ? 'disabled' : ''}>下一页 ›</button>` : '<span>共 0 封邮件</span>';
+    filterControl.addEventListener('change', (event) => { taskFeedbackFilter = event.currentTarget.value; taskFeedbackPage = nextFeedbackPage({ page: taskFeedbackPage, pageCount: normalizedPage.pageCount }, 'filter-change'); void renderTaskFeedbackPanel(taskId); });
+    pageSizeControl.addEventListener('change', (event) => { taskFeedbackPageSize = Number(event.currentTarget.value); taskFeedbackPage = nextFeedbackPage({ page: taskFeedbackPage, pageCount: normalizedPage.pageCount }, 'page-size-change'); void renderTaskFeedbackPanel(taskId); });
+    pager.querySelectorAll('[data-feedback-page]').forEach((button) => button.addEventListener('click', () => { taskFeedbackPage = nextFeedbackPage({ page: taskFeedbackPage, pageCount: normalizedPage.pageCount }, button.dataset.feedbackPage); void renderTaskFeedbackPanel(taskId); }));
     content.querySelectorAll('[data-feedback-drilldown]').forEach((button) => button.addEventListener('click', () => openTaskFeedbackDrilldown(button.dataset.feedbackDrilldown, task, detail)));
   } catch (error) { content.innerHTML = `<div class="send-empty">任务反馈读取失败：${escapeHtml(error.message ?? error)}</div>`; }
 }
@@ -277,10 +391,13 @@ function openTaskFeedbackDrilldown(kind, task, detail = taskFeedbackDetail) {
   } else if (kind === 'confirmed') {
     content.innerHTML = `<section class="task-drilldown-table-wrap"><table class="task-drilldown-table single-column"><thead><tr><th>单位</th></tr></thead><tbody>${items.map((item) => `<tr><td><strong>${escapeHtml(item.companyName)}</strong></td></tr>`).join('')}</tbody></table></section>`;
   } else if (kind === 'pending') {
-    content.innerHTML = `<section class="task-drilldown-table-wrap"><table class="task-drilldown-table"><thead><tr><th>单位</th><th>联系人</th><th>邮箱</th><th>状态</th></tr></thead><tbody>${items.map((item) => {
+    content.innerHTML = `<div class="task-drilldown-toolbar"><span>${items.length} 家待反馈或待确认单位</span><button class="ghost-button" type="button" id="export-pending-from-drilldown">⇩ 导出待反馈单位</button></div><section class="task-drilldown-table-wrap"><table class="task-drilldown-table"><thead><tr><th>单位</th><th>联系人</th><th>邮箱</th><th>状态</th></tr></thead><tbody>${items.map((item) => {
       const contacts = item.contacts ?? [];
-      return `<tr><td><strong>${escapeHtml(item.companyName)}</strong></td><td>${escapeHtml(contacts.map((contact) => contact.contactName).filter(Boolean).join('、') || '—')}</td><td>${escapeHtml(contacts.map((contact) => contact.email).filter(Boolean).join('；') || '—')}</td><td><span class="send-state-chip ${item.feedbackStatus === 'needs_review' ? 'warning' : 'muted'}">${pendingFeedbackStatusLabel(item.feedbackStatus)}</span></td></tr>`;
+      const contactNames = contacts.map((contact) => contact.contactName).filter(Boolean).join('、') || '—';
+      const emails = contacts.map((contact) => contact.email).filter(Boolean).join('；') || '—';
+      return `<tr><td><strong>${escapeHtml(item.companyName)}</strong></td><td title="${escapeHtml(contactNames)}">${escapeHtml(contactNames)}</td><td title="${escapeHtml(emails)}">${escapeHtml(emails)}</td><td><span class="send-state-chip ${item.feedbackStatus === 'needs_review' ? 'warning' : 'muted'}">${pendingFeedbackStatusLabel(item.feedbackStatus)}</span></td></tr>`;
     }).join('')}</tbody></table></section>`;
+    content.querySelector('#export-pending-from-drilldown')?.addEventListener('click', () => exportPendingFeedbackCompanies(task));
   } else {
     content.replaceChildren();
     const list = document.createElement('section');
@@ -307,6 +424,28 @@ function closeTaskFeedbackDrilldown() {
   const modal = document.querySelector('#task-feedback-drilldown-modal');
   modal?.classList.remove('open');
   modal?.setAttribute('aria-hidden', 'true');
+}
+
+function exportPendingFeedbackCompanies(task) {
+  const rows = buildPendingFeedbackExportRows(task, pendingFeedbackCompanies);
+  if (!task || !rows.length) { notify('当前任务没有待反馈或待确认单位可导出。', 'error'); return; }
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), '待反馈单位');
+  downloadBlob(`UniGather-${task.name.replace(/[\\/:*?"<>|]/g, '_')}-待反馈单位.xlsx`, XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  notify(`已导出 ${rows.length} 家待反馈单位。`);
+}
+
+async function openFeedbackMessageInInbox(messageId) {
+  if (!messageId) { notify('该匹配记录未关联原始邮件，无法跳转。', 'error'); return; }
+  await loadInbox({ quiet: true });
+  if (!inboxMessages.some((message) => message.id === messageId)) { notify('收件箱中未找到该邮件，可能已被清理。', 'error'); return; }
+  selectedMessageId = messageId;
+  inboxQuery = '';
+  const search = document.querySelector('#inbox-search');
+  if (search) search.value = '';
+  showView('inbox');
+  renderInboxList();
+  renderInboxDetail();
 }
 
 function renderDashboardSummary(raw) {
@@ -347,28 +486,57 @@ function openTaskDetail(task) {
   const detailModal = document.querySelector('#task-detail-modal');
   if (!detailModal || !task) return;
   detailTaskId = task.id;
-  taskMatchPage = 1;
   detailModal.querySelector('#task-detail-title').textContent = task.name;
-  detailModal.querySelector('#task-detail-percent').textContent = '—';
-  detailModal.querySelector('#task-detail-progress-label').textContent = `正在读取邮件匹配进度 · 单位已反馈 ${task.confirmed_companies ?? 0}/${task.total_companies ?? 0}`;
-  detailModal.querySelector('#task-detail-progress-bar').style.width = '0%';
-  detailModal.querySelector('#task-detail-status').textContent = taskStatusLabel(task.status);
+  const totalCompanies = Number(task.total_companies ?? 0);
+  const confirmedCompanies = Number(task.confirmed_companies ?? 0);
+  const completionPercent = totalCompanies ? Math.round((confirmedCompanies / totalCompanies) * 100) : 0;
+  detailModal.querySelector('#task-detail-percent').textContent = `${completionPercent}%`;
+  detailModal.querySelector('#task-detail-progress-label').textContent = `单位反馈完成度 · 已反馈 ${confirmedCompanies}/${totalCompanies} 家`;
+  detailModal.querySelector('#task-detail-progress-bar').style.width = `${completionPercent}%`;
+  const detailStatus = detailModal.querySelector('#task-detail-status');
+  detailStatus.textContent = taskStatusLabel(task.status);
+  detailStatus.className = `status ${task.status === 'completed' ? 'completed' : task.status === 'paused' ? 'overdue' : 'progress'}`;
   detailModal.querySelector('#task-detail-start').textContent = formatDeadline(task.start_time);
   detailModal.querySelector('#task-detail-deadline').textContent = formatDeadline(task.deadline);
   detailModal.querySelector('#task-detail-poll').textContent = `每 ${task.poll_minutes ?? 30} 分钟`;
   const schedule = taskScheduleSummary(task);
   detailModal.querySelector('#task-detail-last-receive').textContent = schedule.lastText.replace('上次收件：', '');
   detailModal.querySelector('#task-detail-next-receive').textContent = schedule.nextText.replace('下次自动收件：', '');
-  const companyNames = (task.company_ids ?? task.companyIds ?? [])
-    .map((id) => companyOptions.find((option) => option.id === id)?.name)
+  const companyIds = task.company_ids ?? task.companyIds ?? [];
+  const companyList = detailModal.querySelector('#task-detail-company-list');
+  const companyCount = detailModal.querySelector('#task-detail-company-count');
+  const selectedCompanies = companyIds
+    .map((id) => companyOptions.find((option) => option.id === id))
     .filter(Boolean);
-  detailModal.querySelector('#task-detail-companies').textContent = companyNames.join('、') || `${task.total_companies ?? 0} 家单位`;
+  if (companyCount) companyCount.textContent = `共 ${selectedCompanies.length || totalCompanies} 家`;
+  if (companyList) {
+    companyList.replaceChildren();
+    if (!selectedCompanies.length) {
+      companyList.innerHTML = '<div class="task-company-empty">暂未选择单位</div>';
+    } else {
+      selectedCompanies.forEach((company) => {
+        const item = document.createElement('div');
+        item.className = 'task-detail-company-item';
+        const contacts = Array.isArray(company.contacts) ? company.contacts.join('、') : company.contacts;
+        const emails = Array.isArray(company.emails) ? company.emails.join('、') : company.emails;
+        const summary = [contacts, emails].filter(Boolean).join(' · ');
+        item.title = summary ? `${company.name}\n${summary}` : company.name;
+        const name = document.createElement('strong');
+        name.textContent = company.name;
+        const meta = document.createElement('small');
+        meta.textContent = summary || '未填写联系人或邮箱';
+        item.append(name, meta);
+        companyList.append(item);
+      });
+    }
+  }
   detailModal.querySelector('#task-detail-subject').textContent = (task.subject_keywords ?? []).join('、') || '未设置';
+  detailModal.querySelector('#task-detail-body').textContent = (task.body_keywords ?? []).join('、') || '未设置（不限制正文）';
   detailModal.querySelector('#task-detail-directory').textContent = task.save_directory || readMaterialPath();
   const refreshButton = detailModal.querySelector('#refresh-task-detail');
   if (refreshButton) { refreshButton.disabled = Boolean(activeSyncRunId); refreshButton.textContent = activeSyncTaskId === task.id ? '收件中…' : '↻ 立即刷新'; }
   detailModal.classList.add('open'); detailModal.setAttribute('aria-hidden', 'false');
-  void loadTaskMatchDetail(task.id);
+  document.body.classList.add('task-workbench-open');
 }
 
 function taskMatchStatus(status) {
@@ -433,6 +601,7 @@ async function loadTaskMatchDetail(taskId) {
 function closeTaskDetail() {
   const detailModal = document.querySelector('#task-detail-modal');
   detailModal?.classList.remove('open'); detailModal?.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('task-workbench-open');
   detailTaskId = '';
 }
 
@@ -453,14 +622,35 @@ function refreshTaskScheduleDisplays() {
   detailModal.querySelector('#task-detail-next-receive').textContent = schedule.nextText.replace('下次自动收件：', '');
 }
 
-async function deleteTask(task) {
-  if (!window.confirm(`确定删除任务“${task.name}”？相关匹配记录也会停止关联。`)) return;
+async function deleteTask(task, fromManagement = false) {
+  pendingDeleteTask = { task, fromManagement };
+  const modal = document.querySelector('#task-delete-confirm-modal');
+  const copy = document.querySelector('#task-delete-confirm-copy');
+  if (copy) copy.textContent = `任务“${task.name}”会移入“已删除”，邮件、附件和匹配记录将保留，可随时恢复。`;
+  modal?.classList.add('open');
+  modal?.setAttribute('aria-hidden', 'false');
+}
+
+function closeTaskDeleteConfirm() {
+  const modal = document.querySelector('#task-delete-confirm-modal');
+  modal?.classList.remove('open');
+  modal?.setAttribute('aria-hidden', 'true');
+  pendingDeleteTask = null;
+}
+
+async function confirmTaskDelete() {
+  const pending = pendingDeleteTask;
+  if (!pending) return;
+  const button = document.querySelector('#confirm-task-delete');
+  if (button) { button.disabled = true; button.textContent = '删除中…'; }
   try {
-    await invokeCommand('task_delete', { taskId: task.id }, () => null);
-    tasks = tasks.filter((item) => item.id !== task.id);
-    writeLocalTasks(); renderTasks(); void loadDashboardSummary();
-    notify('任务已删除。');
+    await invokeCommand('task_delete', { taskId: pending.task.id }, () => null);
+    await loadTasks();
+    if (pending.fromManagement) renderTaskManagement();
+    closeTaskDeleteConfirm();
+    notify('任务已移入“已删除”，可在任务管理中恢复。');
   } catch (error) { notify(`删除失败：${error.message ?? error}`, 'error'); }
+  finally { if (button) { button.disabled = false; button.textContent = '确认删除'; } }
 }
 
 const modal = document.querySelector('#task-modal');
@@ -1124,7 +1314,6 @@ function initInbox() {
   const sinceInput = document.querySelector('#inbox-since');
   if (sinceInput) sinceInput.value = normalizeInboxStartTime('');
   document.querySelector('#inbox-search')?.addEventListener('input', (event) => { inboxQuery = event.currentTarget.value; renderInboxList(); });
-  document.querySelector('#refresh-inbox')?.addEventListener('click', () => { void loadInbox(); });
   document.querySelector('#inbox-sort')?.addEventListener('change', (event) => {
     const newest = event.currentTarget.value !== 'oldest';
     inboxMessages.sort((left, right) => (newest ? 1 : -1) * ((Date.parse(right.receivedAt) || 0) - (Date.parse(left.receivedAt) || 0)));
@@ -1503,19 +1692,16 @@ document.querySelector('#new-task-2')?.addEventListener('click', () => openTaskM
 document.querySelectorAll('[data-open-task]').forEach((button) => button.addEventListener('click', () => openTaskModal()));
 document.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', closeModal));
 document.querySelectorAll('[data-close-task-detail]').forEach((button) => button.addEventListener('click', closeTaskDetail));
+document.querySelectorAll('[data-close-task-management]').forEach((button) => button.addEventListener('click', closeTaskManagement));
+document.querySelectorAll('[data-close-task-delete-confirm]').forEach((button) => button.addEventListener('click', closeTaskDeleteConfirm));
+document.querySelector('#confirm-task-delete')?.addEventListener('click', () => void confirmTaskDelete());
+document.querySelector('#task-delete-confirm-modal')?.addEventListener('click', (event) => { if (event.target.id === 'task-delete-confirm-modal') closeTaskDeleteConfirm(); });
+document.querySelectorAll('[data-task-management-filter]').forEach((button) => button.addEventListener('click', () => openTaskManagement(button.dataset.taskManagementFilter)));
+document.querySelector('#task-management-filter')?.addEventListener('change', (event) => { taskManagementFilter = event.currentTarget.value; renderTaskManagement(); });
 document.querySelectorAll('[data-close-task-feedback-drilldown]').forEach((button) => button.addEventListener('click', closeTaskFeedbackDrilldown));
 document.querySelector('#task-match-filter')?.addEventListener('change', () => { taskMatchPage = 1; if (detailTaskId) void loadTaskMatchDetail(detailTaskId); });
 document.querySelector('#task-match-page-size')?.addEventListener('change', (event) => { taskMatchPageSize = Number(event.currentTarget.value); taskMatchPage = 1; if (detailTaskId) void loadTaskMatchDetail(detailTaskId); });
 document.querySelector('#task-feedback-select')?.addEventListener('change', (event) => { selectedTaskSummaryId = event.currentTarget.value; renderTasks(); });
-document.querySelector('#export-pending-companies')?.addEventListener('click', () => {
-  const task = tasks.find((item) => item.id === selectedTaskSummaryId);
-  const rows = buildPendingFeedbackExportRows(task, pendingFeedbackCompanies);
-  if (!task || !rows.length) { notify('当前任务没有待反馈或待确认单位可导出。', 'error'); return; }
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), '待反馈单位');
-  downloadBlob(`UniGather-${task.name.replace(/[\\\\/:*?\"<>|]/g, '_')}-待反馈单位.xlsx`, XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  notify(`已导出 ${rows.length} 家待反馈单位。`);
-});
 document.querySelectorAll('[data-close-send-history]').forEach((button) => button.addEventListener('click', () => { const modal = document.querySelector('#send-history-detail-modal'); modal?.classList.remove('open'); modal?.setAttribute('aria-hidden', 'true'); }));
 document.querySelector('#refresh-task-detail')?.addEventListener('click', () => {
   const task = tasks.find((item) => item.id === detailTaskId);

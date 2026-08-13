@@ -179,6 +179,8 @@ pub struct TaskSummary {
     pub ai_enabled: bool,
     #[serde(default)]
     pub company_ids: Vec<String>,
+    #[serde(default)]
+    pub deleted_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +329,7 @@ pub struct TaskMatchAttachment {
 #[serde(rename_all = "camelCase")]
 pub struct TaskMatchMessage {
     pub id: String,
+    pub message_id: String,
     pub sender: String,
     pub subject: String,
     pub received_at: String,
@@ -362,6 +365,20 @@ pub struct TaskMatchDetail {
     pub unmatched: u32,
     pub processed_messages: u32,
     pub total_messages: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskFeedbackPage {
+    pub task_id: String,
+    pub messages: Vec<TaskMatchMessage>,
+    pub total: u32,
+    pub page: u32,
+    pub page_count: u32,
+    pub page_size: u32,
+    pub matched: u32,
+    pub needs_review: u32,
+    pub unmatched: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

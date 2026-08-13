@@ -16,7 +16,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
           start_time TEXT NOT NULL DEFAULT '', poll_minutes INTEGER NOT NULL, save_directory TEXT NOT NULL, filename_template TEXT NOT NULL,
           material_name TEXT NOT NULL DEFAULT '',
           subject_keywords TEXT NOT NULL DEFAULT '[]', body_keywords TEXT NOT NULL DEFAULT '[]',
-          ai_enabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+          ai_enabled INTEGER NOT NULL DEFAULT 0, deleted_at TEXT, deleted_previous_status TEXT, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS task_companies (
           task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -126,6 +126,19 @@ pub fn initialize(connection: &Connection) -> Result<()> {
             "ALTER TABLE tasks ADD COLUMN material_name TEXT NOT NULL DEFAULT ''",
             [],
         )?;
+    }
+    for (column, definition) in [("deleted_at", "TEXT"), ("deleted_previous_status", "TEXT")] {
+        let exists: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            connection.execute(
+                &format!("ALTER TABLE tasks ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
     }
     let has_send_batch_id: i64 = connection.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('send_runs') WHERE name = 'batch_id'",

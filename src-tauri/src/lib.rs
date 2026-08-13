@@ -11,8 +11,8 @@ use models::{
     CompanyDeleteResult, CompanyImportRow, CompanySummary, ConnectionTestResult, DashboardEvent,
     DashboardSummary, MailAttachment, MailMessage, MailboxConfig, MailboxTestReport,
     SendBatchInput, SendBatchItemInput, SendBatchSummary, SendHistoryDetail, SendHistoryItem,
-    SendHistoryRun, SendInput, SyncResult, TaskFeedbackCompany, TaskInput, TaskMatchAttachment,
-    TaskMatchDetail, TaskMatchMessage, TaskSummary, TaskSyncRunSummary,
+    SendHistoryRun, SendInput, SyncResult, TaskFeedbackCompany, TaskFeedbackPage, TaskInput,
+    TaskMatchAttachment, TaskMatchDetail, TaskMatchMessage, TaskSummary, TaskSyncRunSummary,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -670,6 +670,7 @@ fn load_task_match_detail(
             .map_err(|error| error.to_string())?;
         messages.push(TaskMatchMessage {
             id,
+            message_id,
             sender,
             subject,
             received_at,
@@ -706,6 +707,164 @@ fn load_task_match_detail(
         latest_run,
         messages,
     })
+}
+
+fn load_task_feedback_page(
+    connection: &Connection,
+    task_id: &str,
+    status_filter: &str,
+    requested_page: u32,
+    requested_page_size: u32,
+) -> Result<TaskFeedbackPage, String> {
+    let page_size = match requested_page_size {
+        10 | 20 | 31 | 40 | 50 => requested_page_size,
+        _ => 20,
+    };
+    let status_filter = match status_filter {
+        "confirmed" | "needs_review" | "unmatched" => status_filter,
+        _ => "all",
+    };
+    let filter_sql = if status_filter == "all" {
+        ""
+    } else {
+        " AND m.status=?2"
+    };
+    let total: u32 = if status_filter == "all" {
+        connection.query_row(
+            "SELECT COUNT(*) FROM matches m WHERE m.task_id=?1",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+    } else {
+        connection.query_row(
+            &format!("SELECT COUNT(*) FROM matches m WHERE m.task_id=?1{filter_sql}"),
+            rusqlite::params![task_id, status_filter],
+            |row| row.get(0),
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    let page_count = if total == 0 {
+        1
+    } else {
+        total.div_ceil(page_size)
+    };
+    let page = requested_page.max(1).min(page_count);
+    let offset = (page - 1) * page_size;
+    let paging_sql = if status_filter == "all" {
+        " LIMIT ?2 OFFSET ?3"
+    } else {
+        " LIMIT ?3 OFFSET ?4"
+    };
+    let query = format!("SELECT m.id,msg.sender,msg.subject,msg.received_at,m.status,m.reason,COALESCE(c.name,''),msg.id FROM matches m JOIN messages msg ON msg.id=m.message_id LEFT JOIN companies c ON c.id=m.company_id WHERE m.task_id=?1{filter_sql} ORDER BY msg.received_at DESC{paging_sql}");
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| error.to_string())?;
+    let raw: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = if status_filter == "all" {
+        statement
+            .query_map(rusqlite::params![task_id, page_size, offset], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    } else {
+        statement
+            .query_map(
+                rusqlite::params![task_id, status_filter, page_size, offset],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    drop(statement);
+    let mut messages = Vec::with_capacity(raw.len());
+    for (id, sender, subject, received_at, status, reason, company_name, message_id) in raw {
+        let attachments = connection.prepare("SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name")
+            .map_err(|error| error.to_string())?
+            .query_map(rusqlite::params![message_id], |row| {
+                let saved_path: String = row.get(2)?;
+                Ok(TaskMatchAttachment { id: row.get(0)?, name: row.get(1)?, can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(), saved_path, parse_status: row.get(3)? })
+            }).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+        messages.push(TaskMatchMessage {
+            id,
+            message_id,
+            sender,
+            subject,
+            received_at,
+            status,
+            reason,
+            company_name,
+            attachments,
+        });
+    }
+    let count_status = |status: &str| -> Result<u32, String> {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM matches WHERE task_id=?1 AND status=?2",
+                rusqlite::params![task_id, status],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    };
+    Ok(TaskFeedbackPage {
+        task_id: task_id.to_string(),
+        messages,
+        total,
+        page,
+        page_count,
+        page_size,
+        matched: count_status("confirmed")?,
+        needs_review: count_status("needs_review")?,
+        unmatched: count_status("unmatched")?,
+    })
+}
+
+#[tauri::command]
+fn task_feedback_page(
+    task_id: String,
+    status_filter: String,
+    page: u32,
+    page_size: u32,
+    state: State<'_, AppState>,
+) -> Result<TaskFeedbackPage, String> {
+    let connection = state.database.lock().map_err(|error| error.to_string())?;
+    load_task_feedback_page(
+        &connection,
+        task_id.trim(),
+        status_filter.trim(),
+        page,
+        page_size,
+    )
 }
 
 #[tauri::command]
@@ -1310,6 +1469,7 @@ fn task_create(input: TaskInput, state: State<'_, AppState>) -> Result<TaskSumma
         body_keywords: input.body_keywords,
         ai_enabled: input.ai_enabled,
         company_ids: input.company_ids,
+        deleted_at: String::new(),
     })
 }
 
@@ -1318,13 +1478,95 @@ fn task_delete(task_id: String, state: State<'_, AppState>) -> Result<(), String
     if task_id.trim().is_empty() {
         return Err("任务编号不能为空".to_string());
     }
-    let connection = state.database.lock().map_err(|e| e.to_string())?;
-    connection
+    let mut connection = state.database.lock().map_err(|e| e.to_string())?;
+    soft_delete_task_records(&mut connection, &task_id)
+}
+
+fn soft_delete_task_records(connection: &mut Connection, task_id: &str) -> Result<(), String> {
+    let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    let changed = transaction
         .execute(
-            "DELETE FROM tasks WHERE id = ?1",
+            "UPDATE tasks SET deleted_previous_status=status,status='deleted',deleted_at=datetime('now') WHERE id=?1 AND deleted_at IS NULL",
             rusqlite::params![task_id],
         )
         .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("任务不存在或已被删除".to_string());
+    }
+    transaction.commit().map_err(|e| e.to_string())
+}
+
+fn restore_task_records(connection: &mut Connection, task_id: &str) -> Result<(), String> {
+    let changed = connection
+        .execute(
+            "UPDATE tasks SET status='paused',deleted_at=NULL,deleted_previous_status=NULL WHERE id=?1 AND deleted_at IS NOT NULL",
+            rusqlite::params![task_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("任务不存在或未处于已删除状态".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn task_restore(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    if task_id.trim().is_empty() {
+        return Err("任务编号不能为空".to_string());
+    }
+    let mut connection = state.database.lock().map_err(|e| e.to_string())?;
+    restore_task_records(&mut connection, task_id.trim())
+}
+
+fn validate_task_status(status: &str) -> Result<&str, String> {
+    match status.trim() {
+        "active" | "paused" | "completed" => Ok(status.trim()),
+        _ => Err("任务状态仅支持进行中、已中断或已完成".to_string()),
+    }
+}
+
+#[tauri::command]
+fn task_set_status(
+    task_id: String,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if task_id.trim().is_empty() {
+        return Err("任务编号不能为空".to_string());
+    }
+    let status = validate_task_status(&status)?;
+    let connection = state.database.lock().map_err(|e| e.to_string())?;
+    let changed = connection
+        .execute(
+            "UPDATE tasks SET status=?1 WHERE id=?2 AND deleted_at IS NULL",
+            rusqlite::params![status, task_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("任务不存在或已被删除".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn task_rename(task_id: String, name: String, state: State<'_, AppState>) -> Result<(), String> {
+    if task_id.trim().is_empty() {
+        return Err("任务编号不能为空".to_string());
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("任务名称不能为空".to_string());
+    }
+    let connection = state.database.lock().map_err(|e| e.to_string())?;
+    let changed = connection
+        .execute(
+            "UPDATE tasks SET name=?1 WHERE id=?2 AND deleted_at IS NULL",
+            rusqlite::params![name, task_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("任务不存在或已被删除".to_string());
+    }
     Ok(())
 }
 
@@ -1366,6 +1608,21 @@ fn recompute_task_feedback(connection: &Connection, task_id: &str) -> Result<(),
             .execute(
                 "UPDATE task_companies SET feedback_status=?1 WHERE task_id=?2 AND company_id=?3",
                 rusqlite::params![status, task_id, company_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let all_confirmed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_companies WHERE task_id=?1) AND NOT EXISTS(SELECT 1 FROM task_companies WHERE task_id=?1 AND feedback_status <> 'confirmed')",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if all_confirmed {
+        connection
+            .execute(
+                "UPDATE tasks SET status='completed' WHERE id=?1 AND status='active'",
+                rusqlite::params![task_id],
             )
             .map_err(|error| error.to_string())?;
     }
@@ -1482,14 +1739,24 @@ fn task_update(
         body_keywords: input.body_keywords,
         ai_enabled: input.ai_enabled,
         company_ids: input.company_ids,
+        deleted_at: String::new(),
     })
 }
 
 #[tauri::command]
-fn task_list(state: State<'_, AppState>) -> Result<Vec<TaskSummary>, String> {
+fn task_list(
+    include_deleted: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<Vec<TaskSummary>, String> {
     let connection = state.database.lock().map_err(|e| e.to_string())?;
+    let deleted_filter = include_deleted.unwrap_or(false);
+    let where_clause = if deleted_filter {
+        "deleted_at IS NOT NULL"
+    } else {
+        "deleted_at IS NULL"
+    };
     let mut statement = connection
-        .prepare("SELECT id,name,COALESCE(NULLIF(material_name,''),name),status,deadline,start_time,poll_minutes,save_directory,subject_keywords,body_keywords,ai_enabled,(SELECT COUNT(*) FROM task_companies WHERE task_id=tasks.id),(SELECT COUNT(DISTINCT tc.company_id) FROM task_companies tc JOIN matches m ON m.task_id=tc.task_id AND m.company_id=tc.company_id AND m.status='confirmed' WHERE tc.task_id=tasks.id),(SELECT GROUP_CONCAT(company_id) FROM task_companies WHERE task_id=tasks.id) FROM tasks ORDER BY created_at DESC")
+        .prepare(&format!("SELECT id,name,COALESCE(NULLIF(material_name,''),name),status,deadline,start_time,poll_minutes,save_directory,subject_keywords,body_keywords,ai_enabled,(SELECT COUNT(*) FROM task_companies WHERE task_id=tasks.id),(SELECT COUNT(DISTINCT tc.company_id) FROM task_companies tc JOIN matches m ON m.task_id=tc.task_id AND m.company_id=tc.company_id AND m.status='confirmed' WHERE tc.task_id=tasks.id),(SELECT GROUP_CONCAT(company_id) FROM task_companies WHERE task_id=tasks.id),COALESCE(deleted_at,'') FROM tasks WHERE {where_clause} ORDER BY COALESCE(deleted_at,created_at) DESC"))
         .map_err(|e| e.to_string())?;
     let rows = statement
         .query_map([], |row| {
@@ -1524,6 +1791,7 @@ fn task_list(state: State<'_, AppState>) -> Result<Vec<TaskSummary>, String> {
                     .filter(|value| !value.is_empty())
                     .map(ToString::to_string)
                     .collect(),
+                deleted_at: row.get(14)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1570,8 +1838,8 @@ fn load_dashboard_summary(connection: &Connection) -> Result<DashboardSummary, S
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(DashboardSummary {
-        collection_task_count: count("SELECT COUNT(*) FROM tasks")?,
-        active_collection_tasks: count("SELECT COUNT(*) FROM tasks WHERE status='active'")?,
+        collection_task_count: count("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NULL")?,
+        active_collection_tasks: count("SELECT COUNT(*) FROM tasks WHERE status='active' AND deleted_at IS NULL")?,
         send_batch_count: count("SELECT COUNT(*) FROM send_batches")?,
         today_received: count("SELECT COUNT(*) FROM messages WHERE date(received_at,'localtime')=date('now','localtime')")?,
         today_sent_success: count("SELECT COUNT(*) FROM send_items i JOIN send_runs r ON r.id=i.run_id WHERE r.mode='formal' AND i.status='success' AND date(i.sent_at,'localtime')=date('now','localtime')")?,
@@ -2928,9 +3196,10 @@ mod tests {
     use super::{
         archive_task_attachment, database_path_for_executable, delete_company_contact,
         evaluate_task_match, load_dashboard_summary, load_send_history_detail,
-        load_task_match_detail, load_task_pending_companies, next_unique_id,
-        recompute_task_feedback, replace_send_batch_items, resolve_match, validate_archived_path,
-        TaskCompanyRule, TaskSyncRule,
+        load_task_feedback_page, load_task_match_detail, load_task_pending_companies,
+        next_unique_id, recompute_task_feedback, replace_send_batch_items, resolve_match,
+        restore_task_records, soft_delete_task_records, validate_archived_path,
+        validate_task_status, TaskCompanyRule, TaskSyncRule,
     };
     use crate::mail::ParsedMessage;
     use crate::models::SendBatchItemInput;
@@ -2949,6 +3218,14 @@ mod tests {
             received_at: "2026-08-10T10:00:00Z".into(),
             attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn validates_task_lifecycle_statuses() {
+        assert_eq!(validate_task_status("active").unwrap(), "active");
+        assert_eq!(validate_task_status("paused").unwrap(), "paused");
+        assert_eq!(validate_task_status("completed").unwrap(), "completed");
+        assert!(validate_task_status("deleted").is_err());
     }
 
     #[test]
@@ -3220,12 +3497,38 @@ mod tests {
         let detail = load_task_match_detail(&connection, "t").expect("task detail");
         assert_eq!(detail.messages.len(), 1);
         assert_eq!(detail.messages[0].status, "unmatched");
+        assert_eq!(detail.messages[0].message_id, "m");
         assert_eq!(detail.messages[0].attachments.len(), 1);
         assert_eq!(detail.messages[0].attachments[0].name, "报名表.docx");
         assert!(!detail.messages[0].attachments[0].can_open);
         assert_eq!(detail.unmatched, 1);
         assert_eq!(detail.processed_messages, 1);
         assert_eq!(detail.total_messages, 1);
+    }
+
+    #[test]
+    fn task_feedback_page_returns_only_requested_rows_and_total() {
+        let connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        connection.execute("INSERT INTO tasks (id,name,status,deadline,poll_minutes,save_directory,filename_template,created_at) VALUES ('t','任务','active','2026-08-31',30,'.','旧','now')", []).expect("task");
+        for index in 0..51 {
+            let message_id = format!("m{index}");
+            let match_id = format!("x{index}");
+            connection.execute(
+                "INSERT INTO messages (id,mailbox_id,external_id,sender,recipients,cc,subject,body,received_at,content_hash) VALUES (?1,'box',?2,'a@example.com','[]','[]',?3,'正文',printf('2026-08-13T10:%02d:00Z',?4),?5)",
+                rusqlite::params![message_id, format!("e{index}"), format!("材料 {index}"), index, format!("h{index}")],
+            ).expect("message");
+            connection.execute(
+                "INSERT INTO matches (id,message_id,task_id,status,reason) VALUES (?1,?2,'t','unmatched','sender_not_in_task')",
+                rusqlite::params![match_id, message_id],
+            ).expect("match");
+        }
+
+        let page = load_task_feedback_page(&connection, "t", "all", 2, 20).expect("page");
+        assert_eq!(page.messages.len(), 20);
+        assert_eq!(page.total, 51);
+        assert_eq!(page.page_count, 3);
+        assert_eq!(page.page, 2);
     }
 
     #[test]
@@ -3254,6 +3557,17 @@ mod tests {
         recompute_task_feedback(&connection, "t").expect("recompute");
         assert_eq!(feedback_status(&connection, "t", "c1"), "confirmed");
         assert_eq!(feedback_status(&connection, "t", "c2"), "needs_review");
+        assert_eq!(task_status(&connection, "t"), "active");
+
+        connection
+            .execute(
+                "UPDATE matches SET status='confirmed', company_id='c2' WHERE id='x3'",
+                [],
+            )
+            .expect("confirm second company");
+        recompute_task_feedback(&connection, "t").expect("recompute complete");
+        assert_eq!(feedback_status(&connection, "t", "c2"), "confirmed");
+        assert_eq!(task_status(&connection, "t"), "completed");
 
         connection
             .execute(
@@ -3265,6 +3579,66 @@ mod tests {
         assert_eq!(feedback_status(&connection, "t", "c1"), "pending");
     }
 
+    #[test]
+    fn deleting_a_task_keeps_its_matches_and_restore_pauses_it() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        connection
+            .execute(
+                "INSERT INTO companies (id,name,aliases,created_at) VALUES ('c','重庆','[]','now')",
+                [],
+            )
+            .expect("company");
+        connection.execute("INSERT INTO tasks (id,name,status,deadline,poll_minutes,save_directory,filename_template,created_at) VALUES ('t','任务','active','2026-08-31',30,'.','旧','now')", []).expect("task");
+        connection
+            .execute(
+                "INSERT INTO task_companies (task_id,company_id) VALUES ('t','c')",
+                [],
+            )
+            .expect("scope");
+        connection.execute("INSERT INTO messages (id,mailbox_id,external_id,sender,recipients,cc,subject,body,received_at,content_hash) VALUES ('m','box','e','a@example.com','[]','[]','材料','正文','2026-08-13','h')", []).expect("message");
+        connection.execute("INSERT INTO matches (id,message_id,task_id,company_id,status,reason) VALUES ('x','m','t','c','confirmed','rule')", []).expect("match");
+        connection
+            .execute(
+                "INSERT INTO match_candidates (match_id,company_id) VALUES ('x','c')",
+                [],
+            )
+            .expect("candidate");
+
+        soft_delete_task_records(&mut connection, "t").expect("soft delete task");
+
+        assert_eq!(task_status(&connection, "t"), "deleted");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM matches WHERE task_id='t'",
+                    [],
+                    |row| row.get::<_, u32>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM match_candidates", [], |row| row
+                    .get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM messages WHERE id='m'", [], |row| row
+                    .get::<_, u32>(
+                    0
+                ))
+                .unwrap(),
+            1
+        );
+
+        restore_task_records(&mut connection, "t").expect("restore task");
+        assert_eq!(task_status(&connection, "t"), "paused");
+    }
+
     fn feedback_status(connection: &Connection, task_id: &str, company_id: &str) -> String {
         connection
             .query_row(
@@ -3273,6 +3647,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("feedback status")
+    }
+
+    fn task_status(connection: &Connection, task_id: &str) -> String {
+        connection
+            .query_row(
+                "SELECT status FROM tasks WHERE id=?1",
+                rusqlite::params![task_id],
+                |row| row.get(0),
+            )
+            .expect("task status")
     }
 
     #[test]
@@ -3440,9 +3824,13 @@ pub fn run() {
             task_create,
             task_update,
             task_delete,
+            task_restore,
+            task_set_status,
+            task_rename,
             task_list,
             dashboard_summary,
             task_match_detail,
+            task_feedback_page,
             task_pending_companies,
             sync_start,
             sync_status,
