@@ -1,6 +1,6 @@
 import { invokeCommand } from './bridge.js';
-import { buildMailboxPayload, buildMailboxStorage, mailboxDefaults, validateMailboxForm } from './core/mailbox.js';
-import { buildTaskInput, taskProgressPercent, taskStatusLabel, validateTaskInput } from './core/tasks.js';
+import { buildMailboxPayload, buildMailboxStorage, mailboxDefaults, validateMailboxForm, validateMailboxSave } from './core/mailbox.js';
+import { buildTaskInput, taskStatusLabel, validateTaskInput } from './core/tasks.js';
 import { decodeCsvBuffer, parseCompanyMatrix, parseCompanyRows } from './core/attachments.js';
 import { DEFAULT_MATERIAL_PATH, normalizeMaterialPath } from './core/materials.js';
 import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from './core/inbox.js';
@@ -8,28 +8,53 @@ import { normalizeInboxStartTime } from './core/sync.js';
 import { syncProgressLabel, syncProgressPercent } from './core/sync-progress.js';
 import { normalizeAiConfig, validateAiConfig } from './core/ai.js';
 import { formatDownloadProgress, isNewerVersion, pickInstallerAsset } from './core/update.js';
+import { filterCompanyOptions, normalizeCompanyOptions, toggleAllCompanyIds, validateCompanySelection } from './core/company-selection.js';
+import { normalizeSyncEnd } from './core/task-sync.js';
+import { buildTimePresetRange, formatCompanyOptionMeta, validateTimeRange } from './core/task-form-ui.js';
+import { formatTaskScheduleCountdown, formatTaskScheduleTime, getTaskSchedule, shouldRunInitialTaskSync } from './core/task-schedule.js';
+import { formatSendProgress } from './core/send.js';
+import { buildSendBatchItems, composeSendBody, formatBatchProgress, groupSendBatchItems, parseBatchCc, sendItemStatusMeta, validateSendBatch, validateBatchPersistence } from './core/send-workbench.js';
+import { dashboardEventLabel, normalizeDashboardSummary } from './core/dashboard.js';
+import { buildPendingFeedbackExportRows, normalizePendingFeedbackCompanies, pendingFeedbackStatusLabel } from './core/pending-feedback.js';
+import { drilldownItems, paginateTaskMatches } from './core/task-feedback.js';
 import * as XLSX from 'xlsx';
 
 const navItems = document.querySelectorAll('.nav-item');
 const views = document.querySelectorAll('.view');
-const title = document.querySelector('#page-title');
 const toast = document.querySelector('#toast');
-const labels = { dashboard: '仪表盘', tasks: '收集任务', inbox: '收件箱', companies: '分子公司', mailboxes: '邮箱配置', materials: '材料归档', settings: '系统设置' };
 const TASK_STORAGE_KEY = 'unigather.tasks.v1';
 const MAILBOX_STORAGE_KEY = 'unigather.mailbox.v1';
 const MATERIAL_PATH_STORAGE_KEY = 'unigather.material-path.v1';
 const AI_CONFIG_STORAGE_KEY = 'unigather.ai-config.v1';
-const APP_VERSION = '0.0.3';
+const TASK_SYNC_STORAGE_KEY = 'unigather.task-sync-times.v1';
+const TASK_LAST_RECEIVE_STORAGE_KEY = 'unigather.task-last-receive.v1';
+const APP_VERSION = '0.0.4';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
 let companyRows = [];
+let companyOptions = [];
+let selectedCompanyIds = [];
 let inboxMessages = [];
 let selectedMessageId = '';
 let inboxQuery = '';
 let editingTaskId = '';
 let detailTaskId = '';
+let selectedTaskSummaryId = '';
+let pendingFeedbackCompanies = [];
+let taskMatchPage = 1;
+let taskMatchPageSize = 20;
+let taskFeedbackDetail = null;
+let materialNameManuallyEdited = false;
 let activeSyncRunId = '';
+let activeSyncTaskId = '';
 let syncPollTimer = 0;
+let taskPollingTimer = 0;
+let mailboxCredentialPresent = false;
+let sendBatch = { id: '', name: '', sourceDir: '', recursive: true, files: [], items: [], subject: '', body: '', signature: '中国联通总部数据安全工作组', cc: [] };
+let sendBatchHistory = [];
+let activeSendRunId = '';
+let sendPollingTimer = 0;
+let sendTestConfirmed = false;
 
 function notify(message, tone = 'info') {
   if (!toast) return;
@@ -43,9 +68,9 @@ function notify(message, tone = 'info') {
 function showView(name) {
   navItems.forEach((item) => item.classList.toggle('active', item.dataset.view === name));
   views.forEach((view) => view.classList.toggle('active', view.id === `${name}-view`));
-  if (title) title.textContent = labels[name] ?? '仪表盘';
   if (name === 'tasks') renderTasks();
-  if (name === 'dashboard') renderDashboardTask();
+  if (name === 'dashboard') void loadDashboardSummary();
+  if (name === 'send') { renderSendWorkbench(); void loadSendHistory(); }
 }
 
 function readLocalTasks() {
@@ -59,8 +84,38 @@ function writeLocalTasks() {
   localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(tasks));
 }
 
+function readTaskLastReceiveTimes() {
+  try {
+    const value = JSON.parse(localStorage.getItem(TASK_LAST_RECEIVE_STORAGE_KEY) ?? '{}');
+    return value && typeof value === 'object' ? value : {};
+  } catch { return {}; }
+}
+
+function writeTaskLastReceiveTime(taskId, timestamp = Date.now()) {
+  const values = readTaskLastReceiveTimes();
+  values[taskId] = timestamp;
+  localStorage.setItem(TASK_LAST_RECEIVE_STORAGE_KEY, JSON.stringify(values));
+}
+
+function taskSchedule(task, now = Date.now()) {
+  const receiveTimes = readTaskLastReceiveTimes();
+  const scheduleTimes = readTaskSyncTimes();
+  return getTaskSchedule(task, receiveTimes[task.id], now, scheduleTimes[task.id]);
+}
+
+function taskScheduleSummary(task, now = Date.now()) {
+  const schedule = taskSchedule(task, now);
+  const nextText = schedule.stopped
+    ? '已停止'
+    : `${formatTaskScheduleTime(schedule.nextSyncAt)}（${formatTaskScheduleCountdown(schedule.nextSyncAt, now)}）`;
+  return {
+    lastText: `上次收件：${formatTaskScheduleTime(schedule.lastSyncAt)}`,
+    nextText: `下次自动收件：${nextText}`,
+  };
+}
+
 function fallbackTaskSummary(input) {
-  return { id: `local-${Date.now()}`, name: input.name, status: 'active', total_companies: input.company_ids.length, confirmed_companies: 0, deadline: input.deadline, start_time: input.start_time, poll_minutes: input.poll_minutes, save_directory: input.save_directory, subject_keywords: input.subject_keywords, body_keywords: input.body_keywords, ai_enabled: input.ai_enabled };
+  return { id: `local-${Date.now()}`, name: input.name, material_name: input.material_name, status: 'active', total_companies: input.company_ids.length, confirmed_companies: 0, company_ids: input.company_ids, deadline: input.deadline, start_time: input.start_time, poll_minutes: input.poll_minutes, save_directory: input.save_directory, subject_keywords: input.subject_keywords, body_keywords: input.body_keywords, ai_enabled: input.ai_enabled };
 }
 
 async function loadTasks() {
@@ -70,8 +125,12 @@ async function loadTasks() {
   // Remove the two old demo records if they were saved by an earlier preview build.
   tasks = tasks.filter((task) => !['task-q3', 'task-audit'].includes(task.id) && !['2026 年第三季度经营材料收集', '审计整改闭环材料'].includes(task.name));
   writeLocalTasks();
+  const syncTimes = readTaskSyncTimes();
+  tasks.filter((task) => task.status === 'active').forEach((task) => { if (!syncTimes[task.id]) syncTimes[task.id] = Date.now(); });
+  localStorage.setItem(TASK_SYNC_STORAGE_KEY, JSON.stringify(syncTimes));
   renderTasks();
-  renderDashboardTask();
+  void loadDashboardSummary();
+  renderSendWorkbench();
 }
 
 function formatDeadline(value) {
@@ -84,10 +143,23 @@ function formatDeadline(value) {
 function renderTasks() {
   const list = document.querySelector('#task-list');
   if (!list) return;
+  if (!tasks.some((task) => task.id === selectedTaskSummaryId)) selectedTaskSummaryId = tasks.find((task) => task.status === 'active')?.id ?? tasks[0]?.id ?? '';
+  const selected = tasks.find((task) => task.id === selectedTaskSummaryId);
+  const setText = (selector, value) => { const element = document.querySelector(selector); if (element) element.textContent = value; };
+  setText('#task-total-count', tasks.length);
+  setText('#task-active-count', tasks.filter((task) => task.status === 'active').length);
+  setText('#task-confirmed-count', selected?.confirmed_companies ?? 0);
+  setText('#task-pending-count', selected ? Math.max(0, Number(selected.total_companies || 0) - Number(selected.confirmed_companies || 0)) : 0);
+  const selector = document.querySelector('#task-feedback-select');
+  if (selector) {
+    selector.replaceChildren(...tasks.map((task) => { const option = document.createElement('option'); option.value = task.id; option.textContent = task.name; option.selected = task.id === selectedTaskSummaryId; return option; }));
+  }
   list.replaceChildren();
   if (!tasks.length) {
     list.innerHTML = '<div class="panel empty-state"><span class="empty-state-icon">＋</span><h3>还没有收集任务</h3><p>创建任务后，在这里查看反馈进度、同步记录和待反馈单位。</p><button class="primary-button" type="button" data-open-task>创建第一个任务</button></div>';
     list.querySelector('[data-open-task]')?.addEventListener('click', openTaskModal);
+    const feedback = document.querySelector('#task-feedback-content');
+    if (feedback) feedback.innerHTML = '<div class="feedback-empty compact"><span>＋</span><strong>暂无任务</strong><p>创建任务后可查看单位反馈与匹配邮件。</p></div>';
     return;
   }
   tasks.forEach((task, index) => {
@@ -98,14 +170,18 @@ function renderTasks() {
     badge.className = `task-badge${index % 2 ? ' purple' : ''}`;
     badge.textContent = task.name.slice(0, 2);
     const detail = document.createElement('div');
-    detail.innerHTML = `<strong></strong><small></small>`;
+    detail.innerHTML = `<strong></strong><small></small><div class="task-schedule-line"><span></span><span></span></div>`;
     detail.querySelector('strong').textContent = task.name;
     detail.querySelector('small').textContent = `${task.total_companies ?? 0} 家单位　·　截止 ${formatDeadline(task.deadline)}　·　每 ${task.poll_minutes ?? 30} 分钟`;
+    const schedule = taskScheduleSummary(task);
+    detail.querySelector('.task-schedule-line span:first-child').textContent = schedule.lastText;
+    detail.querySelector('.task-schedule-line span:last-child').textContent = schedule.nextText;
     const status = document.createElement('span');
     status.className = `status ${task.status === 'completed' ? 'completed' : task.status === 'paused' ? 'overdue' : 'progress'}`;
     status.textContent = taskStatusLabel(task.status);
     const progress = document.createElement('b');
-    progress.textContent = `${taskProgressPercent(task)}%`;
+    progress.title = '单位反馈完成度';
+    progress.textContent = `已反馈 ${task.confirmed_companies ?? 0}/${task.total_companies ?? 0}`;
     const actions = document.createElement('div');
     actions.className = 'task-row-actions';
     const open = document.createElement('button');
@@ -119,44 +195,239 @@ function renderTasks() {
     row.append(badge, detail, status, progress, actions);
     list.append(row);
   });
+  void renderTaskFeedbackPanel(selectedTaskSummaryId);
 }
 
-function renderDashboardTask() {
-  const banner = document.querySelector('#dashboard-task-banner');
-  if (!banner) return;
-  const active = tasks.find((task) => task.status === 'active');
-  if (!active) {
-    banner.className = 'task-banner empty-task-banner';
-    banner.innerHTML = '<div class="task-badge">＋</div><div class="task-info"><strong>还没有收集任务</strong><span>创建第一个任务后，单位反馈进度会显示在这里。</span></div><button class="ghost-button" data-open-task type="button">创建任务</button>';
-    banner.querySelector('[data-open-task]')?.addEventListener('click', openTaskModal);
+function createAttachmentActions(attachment) {
+  const wrapper = document.createElement('span'); wrapper.className = 'attachment-actions';
+  const name = document.createElement('small'); name.textContent = attachment.name || '未命名附件'; name.title = attachment.savedPath || '';
+  const open = document.createElement('button'); open.type = 'button'; open.className = 'link-button'; open.textContent = '打开文件'; open.disabled = !attachment.savedPath;
+  const locate = document.createElement('button'); locate.type = 'button'; locate.className = 'link-button'; locate.textContent = '打开所在目录'; locate.disabled = !attachment.savedPath;
+  open.addEventListener('click', async () => { try { await invokeCommand('material_open', { path: attachment.savedPath }); } catch (error) { notify(`无法打开附件：${error.message ?? error}`, 'error'); } });
+  locate.addEventListener('click', async () => { try { await invokeCommand('material_open_location', { path: attachment.savedPath }); } catch (error) { notify(`无法打开所在目录：${error.message ?? error}`, 'error'); } });
+  wrapper.append(name, open, locate);
+  return wrapper;
+}
+
+async function renderTaskFeedbackPanel(taskId) {
+  const content = document.querySelector('#task-feedback-content');
+  const task = tasks.find((item) => item.id === taskId);
+  if (!content || !task) return;
+  content.innerHTML = '<div class="send-empty">正在读取任务反馈…</div>';
+  try {
+    const [detail, rawPendingCompanies] = await Promise.all([
+      invokeCommand('task_match_detail', { taskId }),
+      invokeCommand('task_pending_companies', { taskId }),
+    ]);
+    if (selectedTaskSummaryId !== taskId) return;
+    pendingFeedbackCompanies = normalizePendingFeedbackCompanies(rawPendingCompanies);
+    taskFeedbackDetail = detail;
+    const pending = Math.max(0, Number(task.total_companies || 0) - Number(task.confirmed_companies || 0));
+    content.innerHTML = `<div class="task-feedback-stats"><button type="button" data-feedback-drilldown="confirmed"><span>已反馈单位</span><strong>${task.confirmed_companies ?? 0}</strong><small>查看明细 →</small></button><button type="button" data-feedback-drilldown="pending"><span>待反馈单位</span><strong>${pending}</strong><small>查看明细 →</small></button><button type="button" data-feedback-drilldown="needs_review"><span>待确认邮件</span><strong>${detail.needsReview ?? 0}</strong><small>查看邮件 →</small></button><button type="button" data-feedback-drilldown="unmatched"><span>未匹配邮件</span><strong>${detail.unmatched ?? 0}</strong><small>查看邮件 →</small></button></div><section class="pending-feedback-section"><div class="pending-feedback-head"><div><strong>待反馈单位明细</strong><small>含待反馈和待确认单位，可直接导出用于催办。</small></div><span>${pendingFeedbackCompanies.length} 家</span></div><div class="pending-feedback-table-wrap"><table class="pending-feedback-table"><thead><tr><th>单位</th><th>联系人</th><th>邮箱</th><th>电话</th><th>状态</th></tr></thead><tbody id="pending-feedback-list"></tbody></table></div></section><div class="task-feedback-mail-list"></div>`;
+    const pendingList = content.querySelector('#pending-feedback-list');
+    if (!pendingFeedbackCompanies.length) {
+      pendingList.innerHTML = '<tr><td colspan="5" class="pending-feedback-empty">所有单位均已确认反馈。</td></tr>';
+    } else {
+      pendingFeedbackCompanies.forEach((company) => {
+        const contacts = company.contacts ?? [];
+        const row = document.createElement('tr');
+        row.innerHTML = `<td><strong>${escapeHtml(company.companyName)}</strong></td><td>${escapeHtml(contacts.map((contact) => contact.contactName).filter(Boolean).join('、') || '—')}</td><td>${escapeHtml(contacts.map((contact) => contact.email).filter(Boolean).join('；') || '—')}</td><td>${escapeHtml(contacts.map((contact) => contact.phone).filter(Boolean).join('、') || '—')}</td><td><span class="send-state-chip ${company.feedbackStatus === 'needs_review' ? 'warning' : 'muted'}">${pendingFeedbackStatusLabel(company.feedbackStatus)}</span></td>`;
+        pendingList.append(row);
+      });
+    }
+    const list = content.querySelector('.task-feedback-mail-list');
+    const messages = detail.messages ?? [];
+    if (!messages.length) { list.innerHTML = '<div class="send-empty">尚未发现符合任务时间范围的邮件，可点击任务详情中的“立即刷新”。</div>'; return; }
+    messages.forEach((message) => {
+      const [label, tone] = taskMatchStatus(message.status);
+      const row = document.createElement('article'); row.className = 'task-feedback-mail';
+      row.innerHTML = `<div><strong>${escapeHtml(message.subject || '(无主题)')}</strong><small>${escapeHtml(message.sender)} · ${escapeHtml(formatDeadline(message.receivedAt))}</small></div><div><span>${escapeHtml(message.companyName || '未识别单位')}</span><small>${escapeHtml(taskMatchReason(message.reason))}</small></div><span class="send-state-chip ${tone}">${label}</span><div class="task-feedback-attachments"></div>`;
+      const attachments = row.querySelector('.task-feedback-attachments');
+      (message.attachments ?? []).forEach((attachment) => attachments.append(createAttachmentActions(attachment)));
+      if (!(message.attachments ?? []).length) attachments.textContent = '无附件';
+      list.append(row);
+    });
+    content.querySelectorAll('[data-feedback-drilldown]').forEach((button) => button.addEventListener('click', () => openTaskFeedbackDrilldown(button.dataset.feedbackDrilldown, task, detail)));
+  } catch (error) { content.innerHTML = `<div class="send-empty">任务反馈读取失败：${escapeHtml(error.message ?? error)}</div>`; }
+}
+
+function confirmedCompaniesForDetail(detail) {
+  const names = [...new Set((detail.messages ?? []).filter((item) => item.status === 'confirmed' && item.companyName).map((item) => item.companyName))];
+  return names.map((companyName) => {
+    const option = companyOptions.find((item) => item.name === companyName);
+    return {
+      companyName,
+      feedbackStatus: 'confirmed',
+      contacts: [{ contactName: (option?.contacts ?? []).join('、'), email: (option?.emails ?? []).join('；'), phone: (option?.phones ?? []).join('、') }],
+    };
+  });
+}
+
+function openTaskFeedbackDrilldown(kind, task, detail = taskFeedbackDetail) {
+  const modal = document.querySelector('#task-feedback-drilldown-modal');
+  const title = document.querySelector('#task-feedback-drilldown-title');
+  const content = document.querySelector('#task-feedback-drilldown-content');
+  if (!modal || !title || !content || !detail) return;
+  const labels = { confirmed: '已反馈单位', pending: '待反馈单位', needs_review: '待确认邮件', unmatched: '未匹配邮件' };
+  title.textContent = `${task.name} · ${labels[kind] ?? '任务明细'}`;
+  const companies = kind === 'confirmed' ? confirmedCompaniesForDetail(detail) : pendingFeedbackCompanies;
+  const items = drilldownItems(kind, detail.messages ?? [], companies);
+  if (!items.length) {
+    content.innerHTML = '<div class="send-empty">当前没有可查看的明细。</div>';
+  } else if (kind === 'confirmed') {
+    content.innerHTML = `<section class="task-drilldown-table-wrap"><table class="task-drilldown-table single-column"><thead><tr><th>单位</th></tr></thead><tbody>${items.map((item) => `<tr><td><strong>${escapeHtml(item.companyName)}</strong></td></tr>`).join('')}</tbody></table></section>`;
+  } else if (kind === 'pending') {
+    content.innerHTML = `<section class="task-drilldown-table-wrap"><table class="task-drilldown-table"><thead><tr><th>单位</th><th>联系人</th><th>邮箱</th><th>状态</th></tr></thead><tbody>${items.map((item) => {
+      const contacts = item.contacts ?? [];
+      return `<tr><td><strong>${escapeHtml(item.companyName)}</strong></td><td>${escapeHtml(contacts.map((contact) => contact.contactName).filter(Boolean).join('、') || '—')}</td><td>${escapeHtml(contacts.map((contact) => contact.email).filter(Boolean).join('；') || '—')}</td><td><span class="send-state-chip ${item.feedbackStatus === 'needs_review' ? 'warning' : 'muted'}">${pendingFeedbackStatusLabel(item.feedbackStatus)}</span></td></tr>`;
+    }).join('')}</tbody></table></section>`;
+  } else {
+    content.replaceChildren();
+    const list = document.createElement('section');
+    list.className = 'task-drilldown-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'task-drilldown-table task-drilldown-mail-table';
+    table.innerHTML = '<thead><tr><th>邮件主题</th><th>已识别单位</th><th>匹配结论</th><th>归档材料</th></tr></thead>';
+    const body = document.createElement('tbody');
+    items.forEach((item) => {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td><strong>${escapeHtml(item.subject || '(无主题)')}</strong><small>${escapeHtml(item.sender || '未知发件人')} · ${escapeHtml(formatDeadline(item.receivedAt))}</small></td><td>${escapeHtml(item.companyName || '未识别单位')}</td><td><span class="send-state-chip ${kind === 'needs_review' ? 'warning' : 'danger'}">${kind === 'needs_review' ? '待确认' : '未匹配'}</span><small>${escapeHtml(taskMatchReason(item.reason))}</small></td><td><div class="task-drilldown-actions"></div></td>`;
+      const actions = row.querySelector('.task-drilldown-actions');
+      (item.attachments ?? []).forEach((attachment) => actions.append(createAttachmentActions(attachment)));
+      if (!(item.attachments ?? []).length) actions.textContent = '无附件';
+      body.append(row);
+    });
+    table.append(body); list.append(table); content.append(list);
+  }
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeTaskFeedbackDrilldown() {
+  const modal = document.querySelector('#task-feedback-drilldown-modal');
+  modal?.classList.remove('open');
+  modal?.setAttribute('aria-hidden', 'true');
+}
+
+function renderDashboardSummary(raw) {
+  const summary = normalizeDashboardSummary(raw);
+  const assign = (selector, value) => { const element = document.querySelector(selector); if (element) element.textContent = value; };
+  assign('#dashboard-collection-count', summary.collectionTaskCount);
+  assign('#dashboard-collection-subtitle', `进行中 ${summary.activeCollectionTasks} 个`);
+  assign('#dashboard-send-batch-count', summary.sendBatchCount);
+  assign('#dashboard-received-today', summary.todayReceived);
+  assign('#dashboard-receive-status', summary.latestReceiveStatus);
+  assign('#dashboard-sent-today', summary.todaySentSuccess);
+  assign('#dashboard-send-failures', `失败 ${summary.todaySentFailure} 封`);
+  const activity = document.querySelector('#dashboard-activity');
+  if (!activity) return;
+  activity.replaceChildren();
+  if (!summary.recentEvents.length) {
+    activity.innerHTML = '<div class="feedback-empty compact"><span>◎</span><strong>暂无系统动态</strong><p>任务收件或正式发送后会显示在这里。</p></div>';
     return;
   }
-  const total = Number(active.total_companies) || 0;
-  const confirmed = Number(active.confirmed_companies) || 0;
-  const percent = taskProgressPercent(active);
-  banner.className = 'task-banner';
-  banner.innerHTML = `<div class="task-badge">${active.name.slice(0, 2)}</div><div class="task-info"><strong></strong><span></span></div><div class="task-progress"><strong>${percent}%</strong><div class="progress-track"><i style="width:${percent}%"></i></div><span>${confirmed} / ${total} 家单位</span></div><button class="icon-button" type="button" aria-label="打开任务">→</button>`;
-  banner.querySelector('strong').textContent = active.name;
-  banner.querySelector('.task-info span').textContent = `截止时间：${formatDeadline(active.deadline)}　·　每 ${active.poll_minutes ?? 30} 分钟自动收件`;
-  banner.querySelector('.icon-button')?.addEventListener('click', () => openTaskDetail(active));
+  summary.recentEvents.forEach((event) => {
+    const row = document.createElement('button'); row.type = 'button'; row.className = 'dashboard-event';
+    row.innerHTML = `<i class="${event.status === 'failed' ? 'failed' : ''}"></i><div><strong>${escapeHtml(event.title)}</strong><small>${escapeHtml(event.detail)}</small></div><span>${escapeHtml(dashboardEventLabel(event))}<small>${escapeHtml(formatDeadline(event.occurredAt ?? event.occurred_at))}</small></span>`;
+    row.addEventListener('click', () => showView(event.kind === 'send' ? 'send' : 'tasks'));
+    activity.append(row);
+  });
+}
+
+async function loadDashboardSummary() {
+  try {
+    const summary = await invokeCommand('dashboard_summary', {}, () => ({ collectionTaskCount: tasks.length, activeCollectionTasks: tasks.filter((task) => task.status === 'active').length }));
+    renderDashboardSummary(summary);
+  } catch (error) {
+    renderDashboardSummary({ collectionTaskCount: tasks.length, activeCollectionTasks: tasks.filter((task) => task.status === 'active').length, latestReceiveStatus: `统计读取失败：${error.message ?? error}` });
+  }
 }
 
 function openTaskDetail(task) {
   const detailModal = document.querySelector('#task-detail-modal');
   if (!detailModal || !task) return;
   detailTaskId = task.id;
-  const percent = taskProgressPercent(task);
+  taskMatchPage = 1;
   detailModal.querySelector('#task-detail-title').textContent = task.name;
-  detailModal.querySelector('#task-detail-percent').textContent = `${percent}%`;
-  detailModal.querySelector('#task-detail-progress-label').textContent = `${task.confirmed_companies ?? 0} / ${task.total_companies ?? 0} 家单位已反馈`;
-  detailModal.querySelector('#task-detail-progress-bar').style.width = `${percent}%`;
+  detailModal.querySelector('#task-detail-percent').textContent = '—';
+  detailModal.querySelector('#task-detail-progress-label').textContent = `正在读取邮件匹配进度 · 单位已反馈 ${task.confirmed_companies ?? 0}/${task.total_companies ?? 0}`;
+  detailModal.querySelector('#task-detail-progress-bar').style.width = '0%';
   detailModal.querySelector('#task-detail-status').textContent = taskStatusLabel(task.status);
   detailModal.querySelector('#task-detail-start').textContent = formatDeadline(task.start_time);
   detailModal.querySelector('#task-detail-deadline').textContent = formatDeadline(task.deadline);
   detailModal.querySelector('#task-detail-poll').textContent = `每 ${task.poll_minutes ?? 30} 分钟`;
+  const schedule = taskScheduleSummary(task);
+  detailModal.querySelector('#task-detail-last-receive').textContent = schedule.lastText.replace('上次收件：', '');
+  detailModal.querySelector('#task-detail-next-receive').textContent = schedule.nextText.replace('下次自动收件：', '');
+  const companyNames = (task.company_ids ?? task.companyIds ?? [])
+    .map((id) => companyOptions.find((option) => option.id === id)?.name)
+    .filter(Boolean);
+  detailModal.querySelector('#task-detail-companies').textContent = companyNames.join('、') || `${task.total_companies ?? 0} 家单位`;
   detailModal.querySelector('#task-detail-subject').textContent = (task.subject_keywords ?? []).join('、') || '未设置';
   detailModal.querySelector('#task-detail-directory').textContent = task.save_directory || readMaterialPath();
+  const refreshButton = detailModal.querySelector('#refresh-task-detail');
+  if (refreshButton) { refreshButton.disabled = Boolean(activeSyncRunId); refreshButton.textContent = activeSyncTaskId === task.id ? '收件中…' : '↻ 立即刷新'; }
   detailModal.classList.add('open'); detailModal.setAttribute('aria-hidden', 'false');
+  void loadTaskMatchDetail(task.id);
+}
+
+function taskMatchStatus(status) {
+  return { confirmed: ['已匹配', 'success'], needs_review: ['待确认', 'warning'], unmatched: ['未匹配', 'danger'] }[status] ?? ['未知', 'muted'];
+}
+
+function taskMatchReason(reason) {
+  return { sender_and_subject: '发件邮箱与主题均符合', sender_and_body: '发件邮箱与正文均符合', sender_name_and_subject: '发件人名称与主题均符合', sender_name_and_body: '发件人名称与正文均符合', sender_not_in_task: '发件人邮箱或名称不属于所选单位', subject_keyword_mismatch: '主题关键词不符合', body_keyword_mismatch: '正文关键词不符合', multiple_company_matches: '同一发件信息关联多个单位', no_rule_match: '未通过任务规则' }[reason] ?? reason ?? '未记录原因';
+}
+
+async function loadTaskMatchDetail(taskId) {
+  const list = document.querySelector('#task-match-list');
+  const summary = document.querySelector('#task-match-summary');
+  const pager = document.querySelector('#task-match-pagination');
+  if (!list || detailTaskId !== taskId) return;
+  list.innerHTML = '<div class="send-empty">正在读取任务匹配记录…</div>';
+  try {
+    const detail = await invokeCommand('task_match_detail', { taskId });
+    if (detailTaskId !== taskId) return;
+    const processedMessages = Number(detail.processedMessages ?? detail.messages?.length ?? 0);
+    const totalMessages = Math.max(processedMessages, Number(detail.totalMessages ?? processedMessages));
+    const matchPercent = totalMessages ? Math.round((processedMessages / totalMessages) * 100) : 0;
+    const task = tasks.find((item) => item.id === taskId);
+    const detailModal = document.querySelector('#task-detail-modal');
+    if (detailModal?.classList.contains('open')) {
+      detailModal.querySelector('#task-detail-percent').textContent = `${matchPercent}%`;
+      detailModal.querySelector('#task-detail-progress-label').textContent = `邮件匹配进度 ${processedMessages}/${totalMessages} 封 · 单位已反馈 ${task?.confirmed_companies ?? 0}/${task?.total_companies ?? 0}`;
+      detailModal.querySelector('#task-detail-progress-bar').style.width = `${matchPercent}%`;
+    }
+    const filter = document.querySelector('#task-match-filter')?.value ?? 'all';
+    const pageSizeControl = document.querySelector('#task-match-page-size');
+    taskMatchPageSize = Number(pageSizeControl?.value ?? taskMatchPageSize);
+    const filteredRows = (detail.messages ?? []).filter((item) => filter === 'all' || item.status === filter);
+    const page = paginateTaskMatches(filteredRows, taskMatchPage, taskMatchPageSize);
+    taskMatchPage = page.page;
+    const rows = page.items;
+    const run = detail.latestRun;
+    if (summary) summary.textContent = run ? `邮件匹配 ${processedMessages}/${totalMessages} 封 · 已匹配 ${detail.matched} · 待确认 ${detail.needsReview} · 未匹配 ${detail.unmatched} · 显示 ${page.total ? `${(page.page - 1) * page.pageSize + 1}-${Math.min(page.page * page.pageSize, page.total)}` : 0}/${page.total}${run.error ? ` · ${run.error}` : ''}` : '尚未执行收件';
+    list.replaceChildren();
+    if (!rows.length) {
+      list.innerHTML = '<div class="send-empty">当前筛选没有邮件；点击“立即刷新”可按任务时间范围重新检查。</div>';
+    }
+    rows.forEach((item) => {
+      const [label, tone] = taskMatchStatus(item.status);
+      const row = document.createElement('article'); row.className = 'task-match-row';
+      row.innerHTML = `<div class="task-match-mail"><strong>${escapeHtml(item.subject || '(无主题)')}</strong><small>${escapeHtml(item.sender)} · ${escapeHtml(formatDeadline(item.receivedAt))}</small></div><div class="task-match-company"><strong>${escapeHtml(item.companyName || '未识别单位')}</strong><small>${escapeHtml(taskMatchReason(item.reason))}</small></div><span class="send-state-chip ${tone}">${label}</span><div class="task-match-files"><strong>${(item.attachments ?? []).length ? `${(item.attachments ?? []).length} 个归档材料` : '无附件'}</strong><span class="task-match-attachment-actions"></span></div>`;
+      const attachmentArea = row.querySelector('.task-match-attachment-actions');
+      (item.attachments ?? []).forEach((attachment) => attachmentArea.append(createAttachmentActions(typeof attachment === 'string' ? { name: attachment, savedPath: '' } : attachment)));
+      if (!(item.attachments ?? []).length) attachmentArea.textContent = '无附件';
+      list.append(row);
+    });
+    if (pager) {
+      pager.innerHTML = page.total > 0 ? `<span>第 ${page.page} / ${page.pageCount} 页，共 ${page.total} 封</span><button class="ghost-button" type="button" data-task-match-page="previous" ${page.page <= 1 ? 'disabled' : ''}>‹ 上一页</button><button class="ghost-button" type="button" data-task-match-page="next" ${page.page >= page.pageCount ? 'disabled' : ''}>下一页 ›</button>` : '';
+      pager.querySelectorAll('[data-task-match-page]').forEach((button) => button.addEventListener('click', () => {
+        taskMatchPage += button.dataset.taskMatchPage === 'next' ? 1 : -1;
+        void loadTaskMatchDetail(taskId);
+      }));
+    }
+  } catch (error) { list.innerHTML = `<div class="send-empty">读取匹配记录失败：${escapeHtml(error.message ?? error)}</div>`; }
 }
 
 function closeTaskDetail() {
@@ -165,12 +436,29 @@ function closeTaskDetail() {
   detailTaskId = '';
 }
 
+function refreshTaskScheduleDisplays() {
+  document.querySelectorAll('.task-list-row[data-task-id]').forEach((row) => {
+    const task = tasks.find((item) => item.id === row.dataset.taskId);
+    if (!task) return;
+    const schedule = taskScheduleSummary(task);
+    const labels = row.querySelectorAll('.task-schedule-line span');
+    if (labels[0]) labels[0].textContent = schedule.lastText;
+    if (labels[1]) labels[1].textContent = schedule.nextText;
+  });
+  const detailModal = document.querySelector('#task-detail-modal');
+  const task = tasks.find((item) => item.id === detailTaskId);
+  if (!detailModal?.classList.contains('open') || !task) return;
+  const schedule = taskScheduleSummary(task);
+  detailModal.querySelector('#task-detail-last-receive').textContent = schedule.lastText.replace('上次收件：', '');
+  detailModal.querySelector('#task-detail-next-receive').textContent = schedule.nextText.replace('下次自动收件：', '');
+}
+
 async function deleteTask(task) {
   if (!window.confirm(`确定删除任务“${task.name}”？相关匹配记录也会停止关联。`)) return;
   try {
     await invokeCommand('task_delete', { taskId: task.id }, () => null);
     tasks = tasks.filter((item) => item.id !== task.id);
-    writeLocalTasks(); renderTasks(); renderDashboardTask();
+    writeLocalTasks(); renderTasks(); void loadDashboardSummary();
     notify('任务已删除。');
   } catch (error) { notify(`删除失败：${error.message ?? error}`, 'error'); }
 }
@@ -181,6 +469,10 @@ function openTaskModal(task = null) {
   if (!modal) return;
   taskForm?.reset();
   editingTaskId = task?.id ?? '';
+  materialNameManuallyEdited = Boolean(task);
+  selectedCompanyIds = Array.isArray(task?.company_ids) ? [...task.company_ids] : Array.isArray(task?.companyIds) ? [...task.companyIds] : [];
+  const companySearch = document.querySelector('#task-company-search');
+  if (companySearch) companySearch.value = '';
   const modalEyebrow = document.querySelector('#task-modal-eyebrow');
   const modalTitle = document.querySelector('#task-modal-title');
   const saveButton = document.querySelector('#save-task');
@@ -191,15 +483,32 @@ function openTaskModal(task = null) {
   if (startInput) startInput.value = task?.start_time || currentDateTimeLocal();
   if (task) {
     document.querySelector('#task-name').value = task.name ?? '';
+    document.querySelector('#task-material-name').value = task.material_name ?? task.name ?? '';
     document.querySelector('#task-subject-keywords').value = (task.subject_keywords ?? []).join(', ');
     document.querySelector('#task-deadline').value = task.deadline ?? '';
     document.querySelector('#task-poll-minutes').value = String(task.poll_minutes ?? 30);
     document.querySelector('#task-ai-enabled').checked = Boolean(task.ai_enabled);
   }
+  renderTaskMaterialExample();
+  renderTaskTimeSummary();
+  renderTaskCompanyPicker();
   modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false');
   window.setTimeout(() => document.querySelector('#task-name')?.focus(), 0);
 }
 function closeModal() { modal?.classList.remove('open'); modal?.setAttribute('aria-hidden', 'true'); }
+
+function renderTaskMaterialExample() {
+  const taskName = document.querySelector('#task-name')?.value.trim() ?? '';
+  const material = document.querySelector('#task-material-name');
+  if (material && !materialNameManuallyEdited) material.value = taskName;
+  const example = document.querySelector('#task-material-example');
+  if (example) example.textContent = `归档示例：重庆-${material?.value.trim() || taskName || '材料统一名称'}.docx`;
+}
+
+function initTaskMaterialName() {
+  document.querySelector('#task-name')?.addEventListener('input', renderTaskMaterialExample);
+  document.querySelector('#task-material-name')?.addEventListener('input', () => { materialNameManuallyEdited = true; renderTaskMaterialExample(); });
+}
 
 function currentDateTimeLocal() {
   const date = new Date();
@@ -207,29 +516,64 @@ function currentDateTimeLocal() {
   return date.toISOString().slice(0, 16);
 }
 
+function renderTaskTimeSummary() {
+  const start = document.querySelector('#task-start-time')?.value ?? '';
+  const end = document.querySelector('#task-deadline')?.value ?? '';
+  const summary = document.querySelector('#task-time-summary');
+  const errors = validateTimeRange(start, end);
+  const range = document.querySelector('.task-time-range');
+  range?.toggleAttribute('data-invalid', Boolean(Object.keys(errors).length));
+  if (summary) summary.textContent = Object.keys(errors).length ? Object.values(errors)[0] : `${formatDeadline(start)} 至 ${formatDeadline(end)}`;
+}
+
+function applyTimePreset(preset) {
+  const range = buildTimePresetRange(preset);
+  const start = document.querySelector('#task-start-time');
+  const end = document.querySelector('#task-deadline');
+  if (start) start.value = range.start;
+  if (end) end.value = range.end;
+  renderTaskTimeSummary();
+}
+
+function initTaskTimeRange() {
+  document.querySelectorAll('[data-time-preset]').forEach((button) => button.addEventListener('click', () => applyTimePreset(button.dataset.timePreset)));
+  ['#task-start-time', '#task-deadline'].forEach((selector) => document.querySelector(selector)?.addEventListener('input', renderTaskTimeSummary));
+}
+
 async function saveTask(event) {
   event.preventDefault();
-  const values = { name: document.querySelector('#task-name')?.value, subjectKeywords: document.querySelector('#task-subject-keywords')?.value, startTime: document.querySelector('#task-start-time')?.value, deadline: document.querySelector('#task-deadline')?.value, pollMinutes: document.querySelector('#task-poll-minutes')?.value, saveDirectory: readMaterialPath(), aiEnabled: document.querySelector('#task-ai-enabled')?.checked };
-  const errors = validateTaskInput(values);
+  const values = { name: document.querySelector('#task-name')?.value, materialName: document.querySelector('#task-material-name')?.value, subjectKeywords: document.querySelector('#task-subject-keywords')?.value, startTime: document.querySelector('#task-start-time')?.value, deadline: document.querySelector('#task-deadline')?.value, pollMinutes: document.querySelector('#task-poll-minutes')?.value, saveDirectory: readMaterialPath(), aiEnabled: document.querySelector('#task-ai-enabled')?.checked, companyIds: selectedCompanyIds };
+  const errors = { ...validateTaskInput(values), ...validateTimeRange(values.startTime, values.deadline), ...validateCompanySelection(selectedCompanyIds, companyOptions) };
   if (Object.keys(errors).length) { notify(Object.values(errors)[0], 'error'); return; }
   const input = buildTaskInput(values);
+  const createdNew = !editingTaskId;
   try {
     const saved = editingTaskId
-      ? await invokeCommand('task_update', { taskId: editingTaskId, input }, () => ({ ...fallbackTaskSummary(input), ...tasks.find((task) => task.id === editingTaskId), id: editingTaskId, name: input.name, deadline: input.deadline, start_time: input.start_time, poll_minutes: input.poll_minutes, save_directory: input.save_directory, subject_keywords: input.subject_keywords, body_keywords: input.body_keywords, ai_enabled: input.ai_enabled }))
+      ? await invokeCommand('task_update', { taskId: editingTaskId, input }, () => ({ ...fallbackTaskSummary(input), ...tasks.find((task) => task.id === editingTaskId), id: editingTaskId, name: input.name, material_name: input.material_name, company_ids: input.company_ids, total_companies: input.company_ids.length, deadline: input.deadline, start_time: input.start_time, poll_minutes: input.poll_minutes, save_directory: input.save_directory, subject_keywords: input.subject_keywords, body_keywords: input.body_keywords, ai_enabled: input.ai_enabled }))
       : await invokeCommand('task_create', { input }, () => fallbackTaskSummary(input));
     const summary = saved ?? fallbackTaskSummary(input);
     tasks = editingTaskId
       ? tasks.map((task) => task.id === editingTaskId ? summary : task)
       : [summary, ...tasks.filter((task) => task.id !== summary.id)];
-    writeLocalTasks(); closeModal(); renderTasks(); renderDashboardTask(); showView('tasks');
+    writeTaskSyncTime(summary.id);
+    writeLocalTasks(); closeModal(); renderTasks(); void loadDashboardSummary(); showView('tasks');
     notify(editingTaskId ? '任务已更新。' : '任务已创建，已显示在任务列表中。');
     editingTaskId = '';
+    if (createdNew) void runTaskSync(summary, { manual: false });
   } catch (error) { notify(`保存失败：${error.message ?? error}`, 'error'); }
 }
 
 function collectMailboxValues() {
   const protocol = document.querySelector('input[name="mailbox-protocol"]:checked')?.value ?? 'IMAP';
-  return { name: document.querySelector('#mailbox-name')?.value, protocol, host: document.querySelector('#mailbox-host')?.value, port: document.querySelector('#mailbox-port')?.value, username: document.querySelector('#mailbox-username')?.value, password: document.querySelector('#mailbox-password')?.value, encryption: document.querySelector('#mailbox-encryption')?.value, useProxy: document.querySelector('#mailbox-use-proxy')?.checked, proxyType: document.querySelector('#mailbox-proxy-type')?.value, proxyHost: document.querySelector('#mailbox-proxy-host')?.value, proxyPort: document.querySelector('#mailbox-proxy-port')?.value, proxyUsername: document.querySelector('#mailbox-proxy-username')?.value, proxyPassword: document.querySelector('#mailbox-proxy-password')?.value, proxyUrl: buildProxyUrl() };
+  return { name: document.querySelector('#mailbox-name')?.value, protocol, host: document.querySelector('#mailbox-host')?.value, port: document.querySelector('#mailbox-port')?.value, username: document.querySelector('#mailbox-username')?.value, password: document.querySelector('#mailbox-password')?.value, encryption: document.querySelector('#mailbox-encryption')?.value, smtpHost: document.querySelector('#mailbox-smtp-host')?.value, smtpPort: document.querySelector('#mailbox-smtp-port')?.value, smtpEncryption: document.querySelector('#mailbox-smtp-encryption')?.value, smtpSenderName: document.querySelector('#mailbox-smtp-sender-name')?.value, useProxy: document.querySelector('#mailbox-use-proxy')?.checked, proxyType: document.querySelector('#mailbox-proxy-type')?.value, proxyHost: document.querySelector('#mailbox-proxy-host')?.value, proxyPort: document.querySelector('#mailbox-proxy-port')?.value, proxyUsername: document.querySelector('#mailbox-proxy-username')?.value, proxyPassword: document.querySelector('#mailbox-proxy-password')?.value, proxyUrl: buildProxyUrl() };
+}
+
+function validateMailboxForSync(values) {
+  const errors = validateMailboxForm(values);
+  // Desktop mode loads the password from Windows Credential Manager in Rust.
+  // Keep the visible password field optional after the first successful save.
+  if (!values.password) delete errors.password;
+  return errors;
 }
 
 function buildProxyUrl() {
@@ -247,29 +591,64 @@ function parseProxyUrl(value) {
   } catch { return { type: 'http', host: '', port: '' }; }
 }
 
-function setMailboxStatus(state, titleText, detail) {
-  const node = document.querySelector('#mailbox-status');
+function setMailboxConnectionStatus(kind, state, titleText, detail) {
+  const node = document.querySelector(`#mailbox-${kind}-status`);
   if (!node) return;
   node.dataset.state = state; node.querySelector('strong').textContent = titleText; node.querySelector('span').textContent = detail;
 }
 
+function resetMailboxStatuses() {
+  setMailboxConnectionStatus('incoming', 'idle', '收件服务器：尚未测试', '将测试连接、加密和账号认证，不下载邮件。');
+  setMailboxConnectionStatus('outgoing', 'idle', '发件服务器：尚未测试', '将测试 SMTP 连接和认证，不发送邮件。');
+}
+
+function renderMailboxCredentialStatus() {
+  const status = document.querySelector('#mailbox-password-status');
+  const clearButton = document.querySelector('#clear-mailbox-password');
+  if (status) status.textContent = mailboxCredentialPresent ? '已保存密码' : '尚未保存密码';
+  if (clearButton) clearButton.disabled = !mailboxCredentialPresent;
+}
+
+async function loadMailboxCredentialStatus() {
+  const username = document.querySelector('#mailbox-username')?.value?.trim() ?? '';
+  if (!username) {
+    mailboxCredentialPresent = false;
+    renderMailboxCredentialStatus();
+    return;
+  }
+  try {
+    const present = await invokeCommand('mailbox_credentials_status', { username }, () => false);
+    if (document.querySelector('#mailbox-username')?.value?.trim() === username) mailboxCredentialPresent = Boolean(present);
+  } catch {
+    mailboxCredentialPresent = false;
+  }
+  renderMailboxCredentialStatus();
+}
+
 async function testMailbox() {
   const values = collectMailboxValues();
-  const errors = validateMailboxForm(values);
-  if (Object.keys(errors).length) { setMailboxStatus('error', '配置还不完整', Object.values(errors)[0]); notify(Object.values(errors)[0], 'error'); return; }
+  const errors = validateMailboxSave(values, mailboxCredentialPresent);
+  if (Object.keys(errors).length) { setMailboxConnectionStatus('incoming', 'error', '收件服务器：配置不完整', Object.values(errors)[0]); notify(Object.values(errors)[0], 'error'); return; }
   const config = { ...buildMailboxPayload(values), password: values.password ?? '', proxy_username: values.proxyUsername ?? '', proxy_password: values.proxyPassword ?? '' };
-  setMailboxStatus('testing', '正在测试连接…', '正在检查服务器、协议和账号信息，请稍候。');
+  setMailboxConnectionStatus('incoming', 'testing', '收件服务器：测试中…', '正在连接并验证账号，请稍候。');
+  setMailboxConnectionStatus('outgoing', 'testing', '发件服务器：测试中…', '正在连接并验证 SMTP 账号，请稍候。');
   try {
-    const result = await invokeCommand('mailbox_test', { config }, () => '配置格式检查通过（浏览器预览模式未建立真实连接）');
-    setMailboxStatus('success', '连接测试通过', result ?? '服务器配置有效，可以保存。'); notify('邮箱连接测试通过。');
-  } catch (error) { setMailboxStatus('error', '连接测试失败', error.message ?? String(error)); notify('邮箱连接测试失败，请检查配置。', 'error'); }
+    const result = await invokeCommand('mailbox_test', { config }, () => ({ incoming: { status: 'not_configured', message: '浏览器预览模式不建立真实连接', elapsedMs: 0 }, outgoing: { status: 'not_configured', message: '浏览器预览模式不建立真实连接', elapsedMs: 0 } }));
+    [['incoming', '收件服务器', result.incoming], ['outgoing', '发件服务器', result.outgoing]].forEach(([kind, label, item]) => {
+      const state = item?.status === 'success' ? 'success' : (item?.status === 'not_configured' ? 'idle' : 'error');
+      const elapsed = Number(item?.elapsedMs ?? item?.elapsed_ms ?? 0);
+      setMailboxConnectionStatus(kind, state, `${label}：${item?.status === 'success' ? '连接成功' : (item?.status === 'not_configured' ? '未配置' : '连接失败')}`, `${item?.message ?? '未返回结果'}${elapsed ? ` · ${elapsed} ms` : ''}`);
+    });
+    const failed = [result.incoming, result.outgoing].some((item) => item?.status === 'error');
+    notify(failed ? '连接测试已完成，请查看收件和发件的具体结果。' : '收件与发件连接测试完成。', failed ? 'error' : 'success');
+  } catch (error) { setMailboxConnectionStatus('incoming', 'error', '收件服务器：测试失败', error.message ?? String(error)); setMailboxConnectionStatus('outgoing', 'error', '发件服务器：测试失败', error.message ?? String(error)); notify('邮箱连接测试失败，请检查配置。', 'error'); }
 }
 
 function initMailbox() {
   let stored = null;
   try { stored = JSON.parse(localStorage.getItem(MAILBOX_STORAGE_KEY) ?? 'null'); } catch { stored = null; }
   if (stored) {
-    ['name', 'host', 'port', 'username', 'encryption'].forEach((key) => { const node = document.querySelector(`#mailbox-${key}`); if (node && stored[key] != null) node.value = stored[key]; });
+    [['name','name'],['host','host'],['port','port'],['username','username'],['encryption','encryption'],['smtp-host','smtpHost'],['smtp-port','smtpPort'],['smtp-encryption','smtpEncryption'],['smtp-sender-name','smtpSenderName']].forEach(([field, key]) => { const node = document.querySelector(`#mailbox-${field}`); if (node && stored[key] != null) node.value = stored[key]; });
     const radio = document.querySelector(`input[name="mailbox-protocol"][value="${stored.protocol}"]`); if (radio) radio.checked = true;
     const proxy = stored.proxyUrl ? parseProxyUrl(stored.proxyUrl) : { type: stored.proxyType ?? 'http', host: stored.proxyHost ?? '', port: stored.proxyPort ?? '' };
     const useProxy = Boolean(stored.useProxy || stored.proxyUrl || stored.proxyHost);
@@ -277,16 +656,32 @@ function initMailbox() {
     const proxyFields = document.querySelector('#proxy-fields'); if (proxyFields) proxyFields.hidden = !useProxy;
     [['proxy-type', proxy.type], ['proxy-host', proxy.host], ['proxy-port', proxy.port], ['proxy-username', stored.proxyUsername ?? '']].forEach(([key, value]) => { const node = document.querySelector(`#mailbox-${key}`); if (node && value != null) node.value = value; });
   }
+  renderMailboxCredentialStatus();
+  loadMailboxCredentialStatus();
   document.querySelectorAll('input[name="mailbox-protocol"]').forEach((radio) => radio.addEventListener('change', () => {
     const defaults = mailboxDefaults(radio.value); const port = document.querySelector('#mailbox-port'); const encryption = document.querySelector('#mailbox-encryption');
     if (port) port.value = defaults.port; if (encryption) encryption.value = defaults.encryption;
     const hint = document.querySelector('#port-hint'); if (hint) hint.textContent = `${radio.value} + SSL/TLS 通常为 ${defaults.port}`;
   }));
   document.querySelector('#toggle-mailbox-password')?.addEventListener('click', (event) => { const input = document.querySelector('#mailbox-password'); const visible = input.type === 'text'; input.type = visible ? 'password' : 'text'; event.currentTarget.textContent = visible ? '显示' : '隐藏'; event.currentTarget.setAttribute('aria-pressed', String(!visible)); });
+  document.querySelector('#mailbox-username')?.addEventListener('input', () => { mailboxCredentialPresent = false; renderMailboxCredentialStatus(); loadMailboxCredentialStatus(); });
   document.querySelector('#mailbox-use-proxy')?.addEventListener('change', (event) => { const fields = document.querySelector('#proxy-fields'); if (fields) fields.hidden = !event.currentTarget.checked; });
   document.querySelector('#mailbox-test')?.addEventListener('click', testMailbox);
-  document.querySelector('#mailbox-reset')?.addEventListener('click', () => { document.querySelector('#mailbox-form')?.reset(); const fields = document.querySelector('#proxy-fields'); if (fields) fields.hidden = true; setMailboxStatus('idle', '尚未测试连接', '保存前建议先测试一次，确认服务器和账号可以正常访问。'); });
-  document.querySelector('#mailbox-form')?.addEventListener('submit', async (event) => { event.preventDefault(); const values = collectMailboxValues(); const errors = validateMailboxForm(values); if (Object.keys(errors).length) { notify(Object.values(errors)[0], 'error'); return; } localStorage.setItem(MAILBOX_STORAGE_KEY, JSON.stringify(buildMailboxStorage(values))); try { await invokeCommand('mailbox_credentials_save', { username: values.username, password: values.password, proxyUsername: values.proxyUsername ?? '', proxyPassword: values.proxyPassword ?? '' }, () => null); } catch (error) { notify(`邮箱配置已保存，但凭据保存失败：${error.message ?? error}`, 'error'); return; } notify('邮箱配置已保存，代理类型、地址、端口和账号会在下次打开时恢复；密码由 Windows 凭据管理器保存。'); });
+  document.querySelector('#mailbox-reset')?.addEventListener('click', () => { document.querySelector('#mailbox-form')?.reset(); const fields = document.querySelector('#proxy-fields'); if (fields) fields.hidden = true; mailboxCredentialPresent = false; renderMailboxCredentialStatus(); resetMailboxStatuses(); });
+  document.querySelector('#clear-mailbox-password')?.addEventListener('click', async () => {
+    const username = document.querySelector('#mailbox-username')?.value?.trim() ?? '';
+    if (!username) { notify('请先填写收件账号。', 'error'); return; }
+    if (typeof window.confirm === 'function' && !window.confirm('确定清除该账号在本机保存的邮箱和代理密码吗？')) return;
+    try {
+      await invokeCommand('mailbox_credentials_clear', { username }, () => null);
+      mailboxCredentialPresent = false;
+      document.querySelector('#mailbox-password').value = '';
+      document.querySelector('#mailbox-proxy-password').value = '';
+      renderMailboxCredentialStatus();
+      notify('已清除本机保存的密码。');
+    } catch (error) { notify(`清除密码失败：${error.message ?? error}`, 'error'); }
+  });
+  document.querySelector('#mailbox-form')?.addEventListener('submit', async (event) => { event.preventDefault(); const values = collectMailboxValues(); const errors = validateMailboxSave(values, mailboxCredentialPresent); if (Object.keys(errors).length) { notify(Object.values(errors)[0], 'error'); return; } const config = buildMailboxPayload(values); localStorage.setItem(MAILBOX_STORAGE_KEY, JSON.stringify(buildMailboxStorage(values))); try { await invokeCommand('mailbox_credentials_save', { username: values.username, password: values.password, proxyUsername: values.proxyUsername ?? '', proxyPassword: values.proxyPassword ?? '' }, () => null); await invokeCommand('mailbox_config_save', { config: { ...config, password: '', proxy_username: values.proxyUsername ?? '', proxy_password: '' } }, () => null); } catch (error) { notify(`邮箱配置已保存，但凭据保存失败：${error.message ?? error}`, 'error'); return; } if (values.password?.trim()) mailboxCredentialPresent = true; renderMailboxCredentialStatus(); notify('邮箱配置已保存，收件与发信服务器、代理和账号会在下次打开时恢复；密码由 Windows 凭据管理器保存。'); });
   document.querySelector('.summary-edit')?.addEventListener('click', () => document.querySelector('#mailbox-name')?.focus());
 }
 
@@ -301,14 +696,241 @@ function downloadBlob(filename, content, mime = 'application/octet-stream') {
 }
 
 function companyRowsForImport(rows) {
-  return rows.flatMap((row) => row.emails.map((email) => ({ company_name: row.name, contact_name: row.contactName ?? '', email })));
+  return rows.flatMap((row) => row.emails.map((email) => ({ company_name: row.name, contact_name: row.contactName ?? '', email, phone: row.phone ?? '', aliases: (row.aliases ?? []).join(';') })));
 }
 
-function readCompanyRows() {
+function localCompanyOptionRows() {
+  return companyRows.flatMap((row) => (row.emails ?? []).map((email) => ({
+    id: `local-${row.name}`,
+    name: row.name,
+    contact_name: row.contactName ?? '',
+    email,
+    phone: row.phone ?? '',
+    aliases: row.aliases ?? [],
+  })));
+}
+
+async function loadCompanyOptions() {
+  const localOptions = normalizeCompanyOptions(localCompanyOptionRows());
   try {
-    const stored = JSON.parse(localStorage.getItem('unigather.companies.v1') ?? '[]');
-    return Array.isArray(stored) ? stored : [];
-  } catch { return []; }
+    const result = await invokeCommand('company_list', {}, () => localOptions);
+    const backendOptions = Array.isArray(result) && result.length ? result : localOptions;
+    companyOptions = normalizeCompanyOptions(backendOptions);
+  } catch {
+    companyOptions = localOptions;
+  }
+  selectedCompanyIds = selectedCompanyIds.filter((id) => companyOptions.some((option) => option.id === id));
+  renderTaskCompanyPicker();
+  renderSendWorkbench();
+}
+
+function getSendCompanyOptions() {
+  const byName = new Map(companyRows.map((row) => [String(row.name ?? '').trim(), row]));
+  return normalizeCompanyOptions(companyOptions.map((option) => {
+    const local = byName.get(option.name);
+    return { ...option, emails: [...new Set([...(option.emails ?? []), ...(local?.emails ?? [])])], phones: [...new Set([...(option.phones ?? []), ...(local?.phone ? [local.phone] : [])])], aliases: [...new Set([...(option.aliases ?? []), ...(local?.aliases ?? [])])] };
+  }));
+}
+
+function collectSendValues() {
+  return { testRecipient: document.querySelector('#send-test-recipient')?.value.trim() ?? '', subject: document.querySelector('#send-subject')?.value ?? '', body: document.querySelector('#send-body')?.value ?? '', signature: document.querySelector('#send-signature')?.value ?? '', cc: parseBatchCc(document.querySelector('#send-cc')?.value ?? ''), testConfirmed: sendTestConfirmed };
+}
+
+function collectSendMailbox() {
+  const values = collectMailboxValues();
+  const payload = buildMailboxPayload(values);
+  return { ...payload, proxy_username: values.proxyUsername ?? '', proxy_password: values.proxyPassword ?? '', password: values.password ?? '' };
+}
+
+function renderSendPreflight(message = '') {
+  const node = document.querySelector('#send-preflight'); if (!node) return;
+  const result = validateSendBatch(sendBatch.items, collectSendValues());
+  const error = result.errors[0];
+  node.className = `send-preflight${error ? ' has-error' : ''}`;
+  node.innerHTML = `<strong>${error ? '发送前检查未通过' : '发送前检查'}</strong><p>${escapeHtml(message || error || (result.warnings[0] ?? `已匹配 ${groupSendBatchItems(sendBatch.items).length} 家单位，可先发送测试邮件。`))}</p>`;
+}
+
+function updateSendProgress(progress) {
+  const panel = document.querySelector('#send-progress'); if (!panel) return;
+  panel.hidden = false;
+  document.querySelector('#send-progress-text').textContent = progress.message || '正在发送…';
+  document.querySelector('#send-progress-count').textContent = formatBatchProgress(progress);
+  document.querySelector('#send-progress-bar').style.width = `${progress.total ? Math.round((progress.processed / progress.total) * 100) : 0}%`;
+}
+
+async function pollSendStatus() {
+  if (!activeSendRunId) return;
+  try {
+    const progress = await invokeCommand('send_status', { runId: activeSendRunId });
+    if (progress) {
+      updateSendProgress(progress);
+      if (['completed', 'completedWithFailures', 'failed'].includes(progress.status)) {
+        const failed = progress.failure > 0 || progress.status === 'failed';
+        if (!failed) sendTestConfirmed = true;
+        notify(failed ? `发送完成：失败 ${progress.failure ?? 0} 封。` : '测试邮件发送成功，可以进行正式发送。', failed ? 'error' : 'success');
+        ['#send-test', '#send-start'].forEach((selector) => { const button = document.querySelector(selector); if (button) { button.disabled = false; button.textContent = selector === '#send-test' ? '① 发送测试邮件' : '发送正式邮件'; } });
+        activeSendRunId = ''; window.clearTimeout(sendPollingTimer); sendPollingTimer = 0; return;
+      }
+    }
+  } catch (error) { notify(`读取发送进度失败：${error.message ?? error}`, 'error'); activeSendRunId = ''; return; }
+  sendPollingTimer = window.setTimeout(pollSendStatus, 600);
+}
+
+async function runSend(mode) {
+  if (activeSendRunId) { notify('已有发送任务进行中，请稍候。', 'error'); return; }
+  const values = collectSendValues();
+  const validation = validateSendBatch(sendBatch.items, values);
+  if (validation.errors.length) { renderSendPreflight(validation.errors[0]); notify(validation.errors[0], 'error'); return; }
+  if (validation.warnings.length && !window.confirm(`${validation.warnings.join('\n')}\n\n仍要继续吗？`)) return;
+  if (mode === 'formal') {
+    if (window.prompt('正式发送前请确认，输入“确认发送”继续：') !== '确认发送') { notify('已取消正式发送。'); return; }
+  }
+  const button = document.querySelector(mode === 'test' ? '#send-test' : '#send-start');
+  if (button) { button.disabled = true; button.textContent = mode === 'test' ? '测试发送中…' : '正式发送中…'; }
+  try {
+    await persistSendBatch();
+    const input = { batchId: sendBatch.id, subject: values.subject, body: values.body, signature: values.signature, cc: values.cc, testRecipient: values.testRecipient, companyIds: groupSendBatchItems(sendBatch.items).map((item) => item.companyId) };
+    const progress = await invokeCommand(mode === 'test' ? 'send_test' : 'send_start', { input, mailbox: collectSendMailbox() });
+    activeSendRunId = progress.runId; updateSendProgress(progress); void pollSendStatus();
+  } catch (error) { if (button) { button.disabled = false; button.textContent = mode === 'test' ? '① 发送测试邮件' : '发送正式邮件'; } notify(`启动发送失败：${error.message ?? error}`, 'error'); }
+}
+
+async function persistSendBatch() {
+  const values = collectSendValues();
+  sendBatch.name = document.querySelector('#send-batch-name')?.value.trim() || `材料发送 ${new Date().toLocaleString('zh-CN')}`;
+  sendBatch.subject = values.subject; sendBatch.body = values.body; sendBatch.signature = values.signature; sendBatch.cc = values.cc;
+  const summary = await invokeCommand('send_batch_save', { batchId: sendBatch.id, input: { name: sendBatch.name, sourceDir: sendBatch.sourceDir, recursive: sendBatch.recursive, subject: sendBatch.subject, body: sendBatch.body, signature: sendBatch.signature, cc: sendBatch.cc }, items: sendBatch.items.map((item) => ({ id: item.id, fileName: item.fileName, filePath: item.filePath, companyId: item.companyId, companyName: item.companyName, recipients: item.recipients, matchMethod: item.matchMethod, confidence: item.confidence, status: item.status, error: item.error })) });
+  const persistence = validateBatchPersistence(sendBatch.items, summary);
+  if (!persistence.ok) throw new Error(persistence.message);
+  sendBatch.id = summary.id;
+  return summary;
+}
+
+function renderSendMatchList() {
+  const list = document.querySelector('#send-match-list'); if (!list) return;
+  const filter = document.querySelector('#send-match-filter')?.value ?? 'all';
+  const items = sendBatch.items.filter((item) => filter === 'all' || item.status === filter);
+  document.querySelector('#send-match-count').textContent = `${sendBatch.items.length} 个文件 · 待确认 ${sendBatch.items.filter((item) => item.status === 'needs_review' || item.status === 'unmatched').length}`;
+  list.replaceChildren();
+  if (!items.length) { list.innerHTML = '<div class="send-empty">当前筛选没有材料。</div>'; return; }
+  const options = getSendCompanyOptions();
+  items.forEach((item) => {
+    const row = document.createElement('div'); row.className = `send-match-row status-${item.status}`;
+    const info = document.createElement('div'); info.className = 'send-match-file'; info.innerHTML = `<strong>${escapeHtml(item.fileName)}</strong><small>${escapeHtml(item.matchMethod || '未匹配')} · ${Math.round((item.confidence || 0) * 100)}%</small>`;
+    const select = document.createElement('select'); select.className = 'form-select'; select.innerHTML = '<option value="">选择单位</option>' + options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === item.companyId ? 'selected' : ''}>${escapeHtml(option.name)}</option>`).join('');
+    select.addEventListener('change', async () => { const option = options.find((candidate) => candidate.id === select.value); item.companyId = option?.id ?? ''; item.companyName = option?.name ?? ''; item.recipients = option?.emails ?? []; item.status = option?.emails?.length ? 'matched' : 'needs_review'; item.matchMethod = 'manual'; item.confidence = 1; item.error = option?.emails?.length ? '' : '单位没有有效邮箱'; renderSendWorkbench(); if (sendBatch.id) { try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId, decision: item.status }); } catch {} } });
+    const meta = sendItemStatusMeta(item.status, item.error);
+    const status = document.createElement('div'); status.className = 'send-match-state'; status.innerHTML = `<span class="send-state-chip ${meta.tone}">${meta.label}</span><span class="send-match-detail">${escapeHtml(item.status === 'matched' ? `${item.companyName} · ${item.recipients.join('、')} · ${meta.detail}` : meta.detail)}</span>`;
+    const ignore = document.createElement('button'); ignore.type = 'button'; ignore.className = 'ghost-button send-ignore-button'; ignore.textContent = item.status === 'ignored' ? '恢复' : '忽略'; ignore.addEventListener('click', async () => { item.status = item.status === 'ignored' ? (item.companyId && item.recipients.length ? 'matched' : 'needs_review') : 'ignored'; item.error = item.status === 'ignored' ? '已忽略' : ''; renderSendWorkbench(); if (sendBatch.id) { try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId || null, decision: item.status }); } catch {} } });
+    row.append(info, select, status, ignore); list.append(row);
+  });
+}
+
+function renderSendPreview() {
+  const node = document.querySelector('#send-preview-list'); if (!node) return;
+  const groups = groupSendBatchItems(sendBatch.items); document.querySelector('#send-preview-count').textContent = `${groups.length} 封`;
+  const values = collectSendValues();
+  node.replaceChildren(); if (!groups.length) { node.innerHTML = '<div class="send-empty">完成匹配后显示按单位拆分的邮件。</div>'; return; }
+  groups.forEach((group) => { const item = document.createElement('article'); item.className = 'send-preview-item'; const previewBody = composeSendBody(values.body, values.signature).replaceAll('{单位名称}', group.companyName); item.innerHTML = `<strong>${escapeHtml(group.companyName)}</strong><small>To：${escapeHtml(group.recipients.join('、'))}</small><span>${group.attachments.length} 个附件 · ${escapeHtml(previewBody.slice(-60))}</span>`; node.append(item); });
+}
+
+function renderSendWorkbench() { const mailbox = collectMailboxValues(); const service = document.querySelector('#send-service-summary'); if (service) service.textContent = mailbox.smtpHost ? `发信服务：${mailbox.smtpHost}:${mailbox.smtpPort || 465} · ${mailbox.smtpEncryption || 'SSL/TLS'} · 账号 ${mailbox.username || '未填写'}` : '发信服务未配置，请先在邮箱配置中设置 SMTP。'; renderSendMatchList(); renderSendPreview(); renderSendPreflight(); }
+
+async function openSendHistoryDetail(batchId) {
+  const modal = document.querySelector('#send-history-detail-modal'); const content = document.querySelector('#send-history-detail-content');
+  if (!modal || !content) return;
+  modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); content.innerHTML = '<div class="send-empty">正在加载发送记录…</div>';
+  try {
+    const detail = await invokeCommand('send_history_detail', { batchId }); const batch = detail.batch;
+    document.querySelector('#send-history-detail-title').textContent = batch.name || '发送批次';
+    const runs = (detail.runs ?? []).map((run) => `<section class="send-run"><div class="send-run-head"><strong>${run.mode === 'test' ? '测试发送' : run.mode === 'formal' ? '正式发送' : '历史发送'} · ${escapeHtml(run.startedAt)}</strong><span class="send-state-chip ${run.failureCount ? 'danger' : 'success'}">${escapeHtml(run.status)} · 成功 ${run.successCount} / 失败 ${run.failureCount}</span></div>${(run.items ?? []).map((item) => `<div class="send-run-item"><strong>${escapeHtml(item.companyName)}</strong><span>${escapeHtml(item.recipients.join('、'))}</span><span>${escapeHtml(item.status)}</span><small>${escapeHtml(item.error || item.sentAt || '')}</small></div>`).join('') || '<div class="send-empty">没有逐单位明细。</div>'}</section>`).join('');
+    content.innerHTML = `<div class="send-history-meta"><div><small>材料目录</small><strong>${escapeHtml(batch.sourceDir)}</strong></div><div><small>附件数量</small><strong>${batch.itemCount}</strong></div><div><small>邮件主题</small><strong>${escapeHtml(batch.subject)}</strong></div><div><small>邮件签名</small><strong>${escapeHtml(batch.signature || '未设置')}</strong></div></div>${runs || '<div class="send-empty">该批次尚未发送。</div>'}`;
+  } catch (error) { content.innerHTML = `<div class="send-empty">读取历史详情失败：${escapeHtml(error.message ?? error)}</div>`; }
+}
+
+async function loadSendHistory() { try { sendBatchHistory = await invokeCommand('send_history', {}); } catch { sendBatchHistory = []; } const node = document.querySelector('#send-history-list'); if (!node) return; node.replaceChildren(); if (!sendBatchHistory.length) { node.innerHTML = '<div class="send-empty">暂无发送记录。</div>'; return; } sendBatchHistory.forEach((run) => { const row = document.createElement('div'); row.className = 'send-history-row'; row.tabIndex = 0; const info = document.createElement('span'); info.innerHTML = `<strong>${escapeHtml(run.name || run.id || '发送批次')}</strong><small>${escapeHtml(run.status || '')} · ${escapeHtml(run.updatedAt || run.updated_at || '')} · ${run.itemCount ?? 0} 个附件</small>`; row.append(info); const detail = document.createElement('button'); detail.className = 'ghost-button'; detail.type = 'button'; detail.textContent = '查看详情'; detail.addEventListener('click', (event) => { event.stopPropagation(); void openSendHistoryDetail(run.id); }); row.append(detail); row.addEventListener('click', () => void openSendHistoryDetail(run.id)); if (run.failedCount > 0 && run.lastRunId) { const retry = document.createElement('button'); retry.className = 'ghost-button'; retry.type = 'button'; retry.textContent = `重试失败项（${run.failedCount}）`; retry.addEventListener('click', async (event) => { event.stopPropagation(); try { const progress = await invokeCommand('send_retry', { runId: run.lastRunId, mailbox: collectSendMailbox() }); activeSendRunId = progress.runId; updateSendProgress(progress); void pollSendStatus(); notify('已启动失败项重试。', 'success'); } catch (error) { notify(`重试失败：${error.message ?? error}`, 'error'); } }); row.append(retry); } node.append(row); }); }
+
+async function initSendModule() {
+  const dir = document.querySelector('#send-source-dir');
+  try { const signature = await invokeCommand('mail_signature_get', {}, () => '中国联通总部数据安全工作组'); document.querySelector('#send-signature').value = signature || '中国联通总部数据安全工作组'; } catch { document.querySelector('#send-signature').value = '中国联通总部数据安全工作组'; }
+  document.querySelector('#send-select-source')?.addEventListener('click', async () => { try { const { open } = await import('@tauri-apps/plugin-dialog'); const selected = await open({ directory: true, multiple: false }); if (typeof selected === 'string') dir.value = selected; } catch { const selected = window.prompt('请输入材料目录路径'); if (selected) dir.value = selected; } });
+  document.querySelector('#send-scan')?.addEventListener('click', async () => { const sourceDir = dir?.value.trim(); if (!sourceDir) { notify('请先选择材料目录', 'error'); return; } const button = document.querySelector('#send-scan'); button.disabled = true; button.textContent = '扫描中…'; try { const recursive = document.querySelector('#send-recursive')?.checked ?? true; const files = await invokeCommand('send_batch_scan', { sourceDir, recursive }); sendBatch = { ...sendBatch, sourceDir, recursive, files, items: buildSendBatchItems(files, getSendCompanyOptions()), id: '' }; document.querySelector('#send-scan-count').textContent = `发现 ${files.length} 个文件`; renderSendWorkbench(); await persistSendBatch(); notify(`扫描完成：发现 ${files.length} 个可发送文件`, 'success'); } catch (error) { notify(`扫描失败：${error.message ?? error}`, 'error'); } finally { button.disabled = false; button.textContent = '开始扫描'; } });
+  ['send-subject','send-body','send-signature','send-cc','send-test-recipient','send-batch-name'].forEach((id) => document.querySelector(`#${id}`)?.addEventListener('input', () => { sendTestConfirmed = false; renderSendWorkbench(); }));
+  document.querySelector('#save-default-signature')?.addEventListener('click', async () => { try { await invokeCommand('mail_signature_save', { signature: document.querySelector('#send-signature')?.value ?? '' }); notify('默认邮件签名已保存。', 'success'); } catch (error) { notify(`保存签名失败：${error.message ?? error}`, 'error'); } });
+  document.querySelector('#send-match-filter')?.addEventListener('change', renderSendMatchList);
+  document.querySelector('#send-run-check')?.addEventListener('click', () => { const result = validateSendBatch(sendBatch.items, collectSendValues()); renderSendPreflight(result.errors[0] || (result.warnings[0] ?? '检查通过，可以先发送测试邮件。')); notify(result.errors[0] || '检查完成', result.errors[0] ? 'error' : 'success'); });
+  document.querySelector('#send-test')?.addEventListener('click', () => void runSend('test'));
+  document.querySelector('#send-start')?.addEventListener('click', () => void runSend('formal'));
+  document.querySelector('#send-mailbox-link')?.addEventListener('click', () => showView('mailboxes'));
+  document.querySelector('#send-subject').value = '材料收集通知 - {单位名称}'; document.querySelector('#send-body').value = '您好，{单位名称}：\n\n请查收材料并按要求反馈。';
+  renderSendWorkbench(); void loadSendHistory();
+}
+
+function renderTaskCompanyPicker() {
+  const list = document.querySelector('#task-company-list');
+  const count = document.querySelector('#task-company-count');
+  const hint = document.querySelector('#task-company-hint');
+  if (!list) return;
+  const query = document.querySelector('#task-company-search')?.value ?? '';
+  const filtered = filterCompanyOptions(companyOptions, query);
+  const selected = new Set(selectedCompanyIds);
+  if (count) count.textContent = `已选 ${selected.size} / 共 ${companyOptions.length} 家`;
+  if (hint) hint.textContent = companyOptions.length ? '至少选择一家单位；只会将本任务匹配到所选单位。' : '请先在“通讯录”导入单位清单。';
+  list.replaceChildren();
+  if (!companyOptions.length) {
+    list.innerHTML = '<div class="task-company-empty">暂无单位，请先导入单位清单。</div>';
+    return;
+  }
+  if (!filtered.length) {
+    list.innerHTML = '<div class="task-company-empty">没有找到匹配的单位。</div>';
+    return;
+  }
+  filtered.forEach((option) => {
+    const label = document.createElement('label');
+    label.className = 'task-company-option';
+    label.dataset.selected = String(selected.has(option.id));
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.checked = selected.has(option.id); checkbox.dataset.companyId = option.id;
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selectedCompanyIds = [...new Set([...selectedCompanyIds, option.id])];
+      else selectedCompanyIds = selectedCompanyIds.filter((id) => id !== option.id);
+      renderTaskCompanyPicker();
+    });
+    const content = document.createElement('span');
+    const name = document.createElement('strong'); name.textContent = option.name;
+    const detail = document.createElement('small');
+    const meta = formatCompanyOptionMeta(option);
+    detail.textContent = `${meta.contactLabel} · ${meta.emailLabel}`;
+    const selectedLabel = document.createElement('em'); selectedLabel.textContent = '已选';
+    content.append(name, detail); label.append(checkbox, content, selectedLabel); list.append(label);
+  });
+}
+
+function initTaskCompanyPicker() {
+  document.querySelector('#task-company-search')?.addEventListener('input', renderTaskCompanyPicker);
+  document.querySelector('#task-company-select-all')?.addEventListener('click', () => {
+    selectedCompanyIds = toggleAllCompanyIds(companyOptions, selectedCompanyIds);
+    renderTaskCompanyPicker();
+  });
+  document.querySelector('#task-company-clear')?.addEventListener('click', () => {
+    selectedCompanyIds = [];
+    renderTaskCompanyPicker();
+  });
+  renderTaskCompanyPicker();
+}
+
+function flattenCompanyDetails(companies = []) {
+  return companies.flatMap((company) => (company.contacts ?? []).map((contact) => ({
+    companyId: company.id, contactId: contact.id, name: company.name, contactName: contact.contactName ?? contact.contact_name ?? '',
+    emails: [contact.email], phone: contact.phone ?? '', aliases: company.aliases ?? [],
+  })));
+}
+
+async function loadCompanyRows() {
+  const companies = await invokeCommand('company_list', {}, () => []);
+  companyRows = flattenCompanyDetails(Array.isArray(companies) ? companies : []);
+  renderCompanyRows();
+  await loadCompanyOptions();
 }
 
 function renderCompanyRows() {
@@ -324,11 +946,11 @@ function renderCompanyRows() {
   const heading = document.createElement('div');
   heading.className = 'company-table-heading';
   heading.innerHTML = '<div><p class="eyebrow">已导入清单</p><h3></h3></div><span class="company-table-tip">修改单行后点击保存</span>';
-  heading.querySelector('h3').textContent = `${companyRows.length} 行单位联系人`;
+  heading.querySelector('h3').textContent = `${new Set(companyRows.map((row) => row.companyId || row.name)).size} 家单位 / ${companyRows.length} 位联系人`;
   panel.append(heading);
   const table = document.createElement('table');
   table.className = 'company-table';
-  table.innerHTML = '<thead><tr><th>单位名称</th><th>姓名</th><th>邮箱</th><th>操作</th></tr></thead>';
+  table.innerHTML = '<thead><tr><th>单位名称</th><th>姓名</th><th>邮箱</th><th>电话</th><th>单位别名</th><th>操作</th></tr></thead>';
   const body = document.createElement('tbody');
   companyRows.forEach((row, index) => {
     const tr = document.createElement('tr');
@@ -336,9 +958,12 @@ function renderCompanyRows() {
     const name = document.createElement('input'); name.className = 'table-input'; name.value = row.name ?? ''; name.dataset.field = 'name';
     const contact = document.createElement('input'); contact.className = 'table-input'; contact.value = row.contactName ?? ''; contact.dataset.field = 'contactName'; contact.placeholder = '未填写';
     const emails = document.createElement('input'); emails.className = 'table-input'; emails.value = (row.emails ?? []).join('; '); emails.dataset.field = 'emails';
+    const phone = document.createElement('input'); phone.className = 'table-input'; phone.value = row.phone ?? ''; phone.dataset.field = 'phone'; phone.placeholder = '可选';
+    const aliases = document.createElement('input'); aliases.className = 'table-input'; aliases.value = (row.aliases ?? []).join('; '); aliases.dataset.field = 'aliases'; aliases.placeholder = '多个别名用分号分隔';
     const action = document.createElement('button'); action.className = 'ghost-button table-save'; action.type = 'button'; action.textContent = '保存'; action.addEventListener('click', () => saveCompanyRow(index, tr));
-    [name, contact, emails].forEach((input) => { const cell = document.createElement('td'); cell.append(input); tr.append(cell); });
-    const actionCell = document.createElement('td'); actionCell.append(action); tr.append(actionCell);
+    const remove = document.createElement('button'); remove.className = 'ghost-button table-delete'; remove.type = 'button'; remove.textContent = row.draft ? '取消' : '删除'; remove.addEventListener('click', () => row.draft ? cancelCompanyRow(index) : deleteCompanyRow(index));
+    [name, contact, emails, phone, aliases].forEach((input) => { const cell = document.createElement('td'); cell.append(input); tr.append(cell); });
+    const actionCell = document.createElement('td'); actionCell.className = 'company-row-actions'; actionCell.append(action, remove); tr.append(actionCell);
     body.append(tr);
   });
   table.append(body); panel.append(table);
@@ -348,30 +973,42 @@ async function saveCompanyRow(index, rowElement) {
   const values = Object.fromEntries([...rowElement.querySelectorAll('[data-field]')].map((input) => [input.dataset.field, input.value.trim()]));
   const emails = String(values.emails ?? '').split(/[;,，；\s]+/).map((email) => email.trim()).filter(Boolean);
   if (!values.name) { notify('单位名称不能为空。', 'error'); return; }
-  if (!emails.length) { notify('至少填写一个邮箱。', 'error'); return; }
+  if (emails.length !== 1) { notify('每位联系人请填写一个邮箱。', 'error'); return; }
   const previous = companyRows[index];
-  const updated = { name: values.name, contactName: values.contactName ?? '', emails };
-  companyRows[index] = updated;
-  localStorage.setItem('unigather.companies.v1', JSON.stringify(companyRows));
+  const aliases = String(values.aliases ?? '').split(/[;,，；、]+/).map((alias) => alias.trim()).filter(Boolean);
+  const updated = { ...previous, name: values.name, contactName: values.contactName ?? '', emails, phone: values.phone ?? '', aliases };
   try {
-    await invokeCommand('company_import', { rows: companyRowsForImport([updated]) }, () => emails.length);
-    renderCompanyRows();
+    const input = { id: previous.contactId ?? '', companyId: previous.companyId ?? '', companyName: updated.name, contactName: updated.contactName, email: emails[0], phone: updated.phone, aliases };
+    await invokeCommand(previous.draft ? 'company_contact_create' : 'company_contact_update', { input });
+    await loadCompanyRows();
     notify(`已保存“${updated.name}”这一行。`);
   } catch (error) {
-    companyRows[index] = previous;
-    localStorage.setItem('unigather.companies.v1', JSON.stringify(companyRows));
     notify(`保存失败：${error.message ?? error}`, 'error');
   }
 }
 
+function cancelCompanyRow(index) { companyRows.splice(index, 1); renderCompanyRows(); }
+
+async function deleteCompanyRow(index) {
+  const row = companyRows[index];
+  const siblings = companyRows.filter((item) => item.companyId === row.companyId);
+  const warning = siblings.length <= 1 ? `这是“${row.name}”最后一位联系人，删除后将同时删除该单位并从相关收集任务中移除。确定继续吗？` : `确定删除“${row.name}”的联系人“${row.contactName || row.emails?.[0]}”吗？`;
+  if (!window.confirm(warning)) return;
+  try {
+    const result = await invokeCommand('company_contact_delete', { contactId: row.contactId });
+    await loadCompanyRows();
+    notify(result?.deletedCompany ? `已删除单位“${row.name}”，并影响 ${result.affectedTasks ?? 0} 个任务。` : '联系人已删除。');
+  } catch (error) { notify(`删除失败：${error.message ?? error}`, 'error'); }
+}
+
 function initCompanyImport() {
   const fileInput = document.querySelector('#company-file');
-  companyRows = readCompanyRows();
-  renderCompanyRows();
+  void loadCompanyRows().catch((error) => notify(`读取通讯录失败：${error.message ?? error}`, 'error'));
+  document.querySelector('#add-company-contact')?.addEventListener('click', () => { companyRows.unshift({ draft: true, companyId: '', contactId: '', name: '', contactName: '', emails: [], phone: '', aliases: [] }); renderCompanyRows(); document.querySelector('.company-table tbody tr input')?.focus(); });
   document.querySelector('#import-companies')?.addEventListener('click', () => fileInput?.click());
   document.querySelector('#download-company-template')?.addEventListener('click', () => {
     const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.aoa_to_sheet([['单位名称', '姓名', '邮箱'], ['示例单位', '张三', 'mail@example.com']]);
+    const worksheet = XLSX.utils.aoa_to_sheet([['单位名称', '联系人', '邮箱', '电话', '单位别名'], ['示例单位', '张三', 'mail@example.com', '010-12345678', '示例;单位']]);
     XLSX.utils.book_append_sheet(workbook, worksheet, '单位清单');
     downloadBlob('UniGather-单位导入模板.xlsx', XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   });
@@ -390,10 +1027,8 @@ function initCompanyImport() {
         throw new Error('请选择 .xlsx、.xls 或 .csv 文件');
       }
       if (!rows.length) throw new Error('导入文件没有可用的单位数据');
-      companyRows = rows;
-      localStorage.setItem('unigather.companies.v1', JSON.stringify(rows));
-      renderCompanyRows();
       try { await invokeCommand('company_import', { rows: companyRowsForImport(rows) }, () => rows.length); } catch (error) { notify(`本地已导入，但数据库保存失败：${error.message ?? error}`, 'error'); return; }
+      await loadCompanyRows();
       notify(`已导入 ${rows.length} 行单位联系人。`);
     } catch (error) {
       notify(`导入失败：${error.message ?? error}`, 'error');
@@ -436,15 +1071,11 @@ function renderInboxDetail() {
     const section = detail.querySelector('.mail-attachments'); section.hidden = false;
     const list = detail.querySelector('.mail-attachment-list');
     message.attachments.forEach((attachment) => {
-      const item = document.createElement('button'); item.type = 'button'; item.className = `mail-attachment${attachment.savedPath ? ' mail-attachment-openable' : ''}`;
+      const item = document.createElement('div'); item.className = `mail-attachment${attachment.savedPath ? ' mail-attachment-openable' : ''}`;
       const icon = document.createElement('span'); icon.textContent = attachment.name.toLowerCase().endsWith('xlsx') ? '▣' : '▤';
       const name = document.createElement('span'); name.textContent = attachment.name || '未命名附件';
-      const status = document.createElement('small'); status.textContent = attachment.savedPath ? (attachment.parseStatus === 'archive_only' ? '已归档 · 点击打开' : '点击打开') : '未归档';
-      item.append(icon, name, status); list.append(item);
-      if (attachment.savedPath) item.addEventListener('click', async () => {
-        try { await invokeCommand('material_open', { path: attachment.savedPath }); }
-        catch (error) { notify(`无法打开附件：${error.message ?? error}`, 'error'); }
-      });
+      const status = document.createElement('small'); status.textContent = attachment.savedPath ? '已归档到本地' : '附件尚未归档到本地';
+      item.append(icon, name, status, createAttachmentActions(attachment)); list.append(item);
     });
   }
 }
@@ -505,7 +1136,7 @@ function initInbox() {
 
 async function runInboxSync() {
   const values = collectMailboxValues();
-  const errors = validateMailboxForm(values);
+  const errors = validateMailboxForSync(values);
   if (Object.keys(errors).length) {
     notify(`请先完成邮箱配置：${Object.values(errors)[0]}`, 'error');
     showView('mailboxes');
@@ -524,15 +1155,16 @@ async function runInboxSync() {
   if (progressText) progressText.textContent = '正在准备收件…';
   if (progressCount) progressCount.textContent = '已处理 0 封';
   try {
-    const active = tasks.find((task) => task.status === 'active');
     const mailbox = { ...buildMailboxPayload(values), password: values.password ?? '', proxy_username: values.proxyUsername ?? '', proxy_password: values.proxyPassword ?? '' };
-    const initial = await invokeCommand('sync_start', { taskId: active?.id ?? '', mailbox, since }, (error) => { throw new Error(`当前不是可用的 Tauri 桌面运行环境：${error?.message ?? error}`); });
+    const initial = await invokeCommand('sync_start', { taskId: '', mailbox, since, until: normalizeSyncEnd('') }, (error) => { throw new Error(`当前不是可用的 Tauri 桌面运行环境：${error?.message ?? error}`); });
     activeSyncRunId = initial?.runId ?? initial?.run_id ?? '';
+    activeSyncTaskId = '';
     if (!activeSyncRunId) throw new Error('收件任务未返回运行编号');
     await pollInboxSync({ button, progressPanel, progressBar, progressText, progressCount });
   } catch (error) {
     notify(`收件失败：${error.message ?? error}`, 'error');
     activeSyncRunId = '';
+    activeSyncTaskId = '';
     if (progressPanel) progressPanel.hidden = true;
     if (button) { button.disabled = false; button.textContent = '立即收件'; }
   }
@@ -550,6 +1182,7 @@ async function pollInboxSync(elements) {
     await loadInbox({ quiet: true });
     if (progress.status === 'completed' || progress.status === 'failed') {
       activeSyncRunId = '';
+      activeSyncTaskId = '';
       if (progress.status === 'failed') notify(`收件失败：${progress.errors?.[0] ?? progress.message}`, 'error');
       else if (progress.errors?.length) notify(`收件完成：新增 ${progress.received ?? 0} 封，重复 ${progress.duplicates ?? 0} 封；${progress.errors[0]}`, 'error');
       else notify(`收件完成：新增 ${progress.received ?? 0} 封，重复 ${progress.duplicates ?? 0} 封。`);
@@ -559,6 +1192,103 @@ async function pollInboxSync(elements) {
     }
     await new Promise((resolve) => { syncPollTimer = window.setTimeout(resolve, 450); });
   }
+}
+
+function readTaskSyncTimes() {
+  try {
+    const value = JSON.parse(localStorage.getItem(TASK_SYNC_STORAGE_KEY) ?? '{}');
+    return value && typeof value === 'object' ? value : {};
+  } catch { return {}; }
+}
+
+function writeTaskSyncTime(taskId, timestamp = Date.now()) {
+  const values = readTaskSyncTimes();
+  values[taskId] = timestamp;
+  localStorage.setItem(TASK_SYNC_STORAGE_KEY, JSON.stringify(values));
+}
+
+function setTaskSyncUi(task, progress = null) {
+  const modal = document.querySelector('#task-detail-modal');
+  if (!modal || detailTaskId !== task.id) return;
+  const panel = modal.querySelector('#task-detail-sync-panel');
+  const text = modal.querySelector('#task-detail-sync-text');
+  const count = modal.querySelector('#task-detail-sync-count');
+  const bar = modal.querySelector('#task-detail-sync-bar');
+  const button = modal.querySelector('#refresh-task-detail');
+  if (panel) panel.hidden = !progress;
+  if (button) { button.disabled = Boolean(progress); button.textContent = progress ? '收件中…' : '↻ 立即刷新'; }
+  if (!progress) return;
+  const percent = syncProgressPercent(progress);
+  if (text) text.textContent = syncProgressLabel(progress);
+  if (count) count.textContent = `已处理 ${progress.processed ?? 0} 封 · 匹配 ${progress.matched ?? 0} 封`;
+  if (bar) bar.style.width = `${percent}%`;
+}
+
+async function runTaskSync(task, { manual = true } = {}) {
+  if (!task || activeSyncRunId) return false;
+  const values = collectMailboxValues();
+  const errors = validateMailboxForSync(values);
+  if (Object.keys(errors).length) {
+    if (manual) { notify(`请先完成邮箱配置：${Object.values(errors)[0]}`, 'error'); showView('mailboxes'); }
+    return false;
+  }
+  activeSyncTaskId = task.id;
+  const since = task.start_time || normalizeInboxStartTime('');
+  const until = normalizeSyncEnd(task.deadline || '');
+  setTaskSyncUi(task, { status: 'running', processed: 0, total: 0, received: 0, matched: 0, message: '正在准备任务刷新…' });
+  try {
+    const mailbox = { ...buildMailboxPayload(values), password: values.password ?? '', proxy_username: values.proxyUsername ?? '', proxy_password: values.proxyPassword ?? '' };
+    const initial = await invokeCommand('sync_start', { taskId: task.id, mailbox, since, until }, (error) => { throw new Error(`当前不是可用的 Tauri 桌面运行环境：${error?.message ?? error}`); });
+    activeSyncRunId = initial?.runId ?? initial?.run_id ?? '';
+    if (!activeSyncRunId) throw new Error('任务刷新未返回运行编号');
+    writeTaskSyncTime(task.id);
+    while (activeSyncRunId === (initial?.runId ?? initial?.run_id ?? activeSyncRunId)) {
+      const progress = await invokeCommand('sync_status', { runId: activeSyncRunId });
+      if (!progress) throw new Error('任务刷新状态已丢失');
+      setTaskSyncUi(task, progress);
+      if (progress.status === 'completed' || progress.status === 'failed') {
+        activeSyncRunId = '';
+        activeSyncTaskId = '';
+        if (progress.status === 'completed') writeTaskLastReceiveTime(task.id);
+        await loadTasks();
+        const refreshed = tasks.find((item) => item.id === task.id) ?? task;
+        if (detailTaskId === task.id) { openTaskDetail(refreshed); setTaskSyncUi(refreshed, null); }
+        if (manual) {
+          if (progress.status === 'failed') notify(`任务刷新失败：${progress.errors?.[0] ?? progress.message}`, 'error');
+          else notify(`任务刷新完成：新增 ${progress.received ?? 0} 封，匹配 ${progress.matched ?? 0} 封。`);
+        }
+        return progress.status === 'completed';
+      }
+      await new Promise((resolve) => { syncPollTimer = window.setTimeout(resolve, 500); });
+    }
+  } catch (error) {
+    activeSyncRunId = '';
+    activeSyncTaskId = '';
+    setTaskSyncUi(task, null);
+    if (manual) notify(`任务刷新失败：${error.message ?? error}`, 'error');
+    return false;
+  }
+  return false;
+}
+
+function startTaskPolling() {
+  window.clearInterval(taskPollingTimer);
+  taskPollingTimer = window.setInterval(() => {
+    refreshTaskScheduleDisplays();
+    if (activeSyncRunId) return;
+    const mailboxErrors = validateMailboxForSync(collectMailboxValues());
+    if (Object.keys(mailboxErrors).length) return;
+    const now = Date.now();
+    const times = readTaskSyncTimes();
+    const receiveTimes = readTaskLastReceiveTimes();
+    const due = tasks.find((task) => {
+      const deadline = Date.parse(task.deadline ?? '');
+      return shouldRunInitialTaskSync(task, receiveTimes[task.id], now) || (task.status === 'active'
+        && (Number.isNaN(deadline) || deadline > now)
+        && now - Number(times[task.id] ?? now) >= (Number(task.poll_minutes) || 30) * 60 * 1000);
+    });
+    if (due) void runTaskSync(due, { manual: false });
+  }, 30000);
 }
 
 function readMaterialPath() {
@@ -769,12 +1499,28 @@ function safeGitHubUrl(value) {
 
 navItems.forEach((item) => item.addEventListener('click', () => showView(item.dataset.view)));
 document.querySelectorAll('[data-view]').forEach((item) => item.addEventListener('click', () => showView(item.dataset.view)));
-document.querySelector('#sync-now')?.addEventListener('click', () => { showView('inbox'); void runInboxSync(); });
-document.querySelector('#new-task')?.addEventListener('click', openTaskModal);
-document.querySelector('#new-task-2')?.addEventListener('click', openTaskModal);
-document.querySelectorAll('[data-open-task]').forEach((button) => button.addEventListener('click', openTaskModal));
+document.querySelector('#new-task-2')?.addEventListener('click', () => openTaskModal());
+document.querySelectorAll('[data-open-task]').forEach((button) => button.addEventListener('click', () => openTaskModal()));
 document.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', closeModal));
 document.querySelectorAll('[data-close-task-detail]').forEach((button) => button.addEventListener('click', closeTaskDetail));
+document.querySelectorAll('[data-close-task-feedback-drilldown]').forEach((button) => button.addEventListener('click', closeTaskFeedbackDrilldown));
+document.querySelector('#task-match-filter')?.addEventListener('change', () => { taskMatchPage = 1; if (detailTaskId) void loadTaskMatchDetail(detailTaskId); });
+document.querySelector('#task-match-page-size')?.addEventListener('change', (event) => { taskMatchPageSize = Number(event.currentTarget.value); taskMatchPage = 1; if (detailTaskId) void loadTaskMatchDetail(detailTaskId); });
+document.querySelector('#task-feedback-select')?.addEventListener('change', (event) => { selectedTaskSummaryId = event.currentTarget.value; renderTasks(); });
+document.querySelector('#export-pending-companies')?.addEventListener('click', () => {
+  const task = tasks.find((item) => item.id === selectedTaskSummaryId);
+  const rows = buildPendingFeedbackExportRows(task, pendingFeedbackCompanies);
+  if (!task || !rows.length) { notify('当前任务没有待反馈或待确认单位可导出。', 'error'); return; }
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), '待反馈单位');
+  downloadBlob(`UniGather-${task.name.replace(/[\\\\/:*?\"<>|]/g, '_')}-待反馈单位.xlsx`, XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  notify(`已导出 ${rows.length} 家待反馈单位。`);
+});
+document.querySelectorAll('[data-close-send-history]').forEach((button) => button.addEventListener('click', () => { const modal = document.querySelector('#send-history-detail-modal'); modal?.classList.remove('open'); modal?.setAttribute('aria-hidden', 'true'); }));
+document.querySelector('#refresh-task-detail')?.addEventListener('click', () => {
+  const task = tasks.find((item) => item.id === detailTaskId);
+  if (task) void runTaskSync(task, { manual: true });
+});
 document.querySelector('#edit-task-detail')?.addEventListener('click', () => {
   const task = tasks.find((item) => item.id === detailTaskId);
   closeTaskDetail();
@@ -785,6 +1531,10 @@ document.querySelector('#add-mailbox')?.addEventListener('click', () => { showVi
 
 initMailbox();
 initCompanyImport();
+initTaskCompanyPicker();
+initTaskTimeRange();
+initTaskMaterialName();
 initInbox();
+initSendModule();
 initMaterialsAndSettings();
-loadTasks();
+void loadTasks().then(startTaskPolling);

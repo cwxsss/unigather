@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { matchMessageToTask } from '../src/core/matching.js';
 import { buildAttachmentName } from '../src/core/filename.js';
 import { getFeedbackStatus } from '../src/core/status.js';
 import { classifyAttachment, buildAiPayload, decodeCsvBuffer, parseCompanyRows, parseCompanyMatrix } from '../src/core/attachments.js';
-import { mailboxDefaults, validateMailboxForm, buildMailboxPayload, buildMailboxStorage } from '../src/core/mailbox.js';
+import { mailboxDefaults, validateMailboxForm, validateMailboxSave, buildMailboxPayload, buildMailboxStorage } from '../src/core/mailbox.js';
 import { splitKeywords, validateTaskInput, buildTaskInput, taskProgressPercent, taskStatusLabel } from '../src/core/tasks.js';
 import { normalizeVersion, isNewerVersion, pickInstallerAsset, formatDownloadProgress } from '../src/core/update.js';
 import { DEFAULT_MATERIAL_PATH, normalizeMaterialPath } from '../src/core/materials.js';
@@ -12,6 +13,15 @@ import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from '.
 import { defaultInboxStartTime, normalizeInboxStartTime } from '../src/core/sync.js';
 import { DEFAULT_AI_ENDPOINT, normalizeAiConfig, validateAiConfig } from '../src/core/ai.js';
 import { syncProgressPercent, syncProgressLabel } from '../src/core/sync-progress.js';
+import { normalizeCompanyOptions, filterCompanyOptions, toggleAllCompanyIds, validateCompanySelection } from '../src/core/company-selection.js';
+import { formatCompanyOptionMeta, buildTimePresetRange, validateTimeRange } from '../src/core/task-form-ui.js';
+import { isWithinSyncWindow, matchMessageToCompanyTask, normalizeSyncEnd } from '../src/core/task-sync.js';
+import { getTaskSchedule, formatTaskScheduleTime, formatTaskScheduleCountdown, shouldRunInitialTaskSync } from '../src/core/task-schedule.js';
+import { buildSendPayload, formatSendProgress, normalizeSendTargets, validateSendForm } from '../src/core/send.js';
+import { buildSendBatchItems, composeSendBody, groupSendBatchItems, parseBatchCc, sendItemStatusMeta, validateSendBatch, validateBatchPersistence } from '../src/core/send-workbench.js';
+import { normalizeDashboardSummary } from '../src/core/dashboard.js';
+import { buildPendingFeedbackExportRows, normalizePendingFeedbackCompanies, pendingFeedbackStatusLabel } from '../src/core/pending-feedback.js';
+import { drilldownItems, paginateTaskMatches } from '../src/core/task-feedback.js';
 
 test('matches sender mapping and fuzzy subject rule', () => {
   const result = matchMessageToTask({
@@ -74,8 +84,8 @@ test('builds an AI payload without attachment contents', () => {
 
 test('imports company email mappings from CSV-shaped rows', () => {
   assert.deepEqual(parseCompanyRows('单位名称,姓名,邮箱\n北桥公司,张三,a@example.com; b@example.com\n华东中心,李四,c@example.com'), [
-    { name: '北桥公司', contactName: '张三', emails: ['a@example.com', 'b@example.com'] },
-    { name: '华东中心', contactName: '李四', emails: ['c@example.com'] },
+    { name: '北桥公司', contactName: '张三', emails: ['a@example.com', 'b@example.com'], phone: '', aliases: [] },
+    { name: '华东中心', contactName: '李四', emails: ['c@example.com'], phone: '', aliases: [] },
   ]);
 });
 
@@ -85,8 +95,8 @@ test('imports company names from an Excel-like worksheet matrix', () => {
     ['北桥公司', '张三', 'a@example.com'],
     ['华东中心', '李四', 'c@example.com'],
   ]), [
-    { name: '北桥公司', contactName: '张三', emails: ['a@example.com'] },
-    { name: '华东中心', contactName: '李四', emails: ['c@example.com'] },
+    { name: '北桥公司', contactName: '张三', emails: ['a@example.com'], phone: '', aliases: [] },
+    { name: '华东中心', contactName: '李四', emails: ['c@example.com'], phone: '', aliases: [] },
   ]);
 });
 
@@ -162,7 +172,7 @@ test('validates mailbox form and keeps password out of the payload', () => {
   assert.equal(payload.password_key, 'admin@example.com');
   assert.equal(payload.proxy_url, '');
   assert.deepEqual(buildMailboxStorage({ name: '总部', protocol: 'IMAP', host: 'imap.example.com', port: '993', username: 'admin@example.com', password: 'secret', encryption: 'SSL/TLS', useProxy: true, proxyType: 'socks5', proxyHost: '127.0.0.1', proxyPort: '7890', proxyUsername: 'proxy-user', proxyPassword: 'proxy-secret', proxyUrl: 'socks5://127.0.0.1:7890' }), {
-    name: '总部', protocol: 'IMAP', host: 'imap.example.com', port: 993, username: 'admin@example.com', password_key: 'admin@example.com', encryption: 'SSL/TLS', useProxy: true, proxyType: 'socks5', proxyHost: '127.0.0.1', proxyPort: 7890, proxyUsername: 'proxy-user', proxyUrl: 'socks5://127.0.0.1:7890', enabled: true,
+    name: '总部', protocol: 'IMAP', host: 'imap.example.com', port: 993, username: 'admin@example.com', password_key: 'admin@example.com', encryption: 'SSL/TLS', smtp_host: '', smtp_port: 465, smtp_encryption: 'SSL/TLS', smtp_sender_name: '', useProxy: true, proxyType: 'socks5', proxyHost: '127.0.0.1', proxyPort: 7890, proxyUsername: 'proxy-user', smtpHost: '', smtpPort: 465, smtpEncryption: 'SSL/TLS', smtpSenderName: '', proxyUrl: 'socks5://127.0.0.1:7890', enabled: true,
   });
 });
 
@@ -170,16 +180,63 @@ test('builds a normalized task payload from the create form', () => {
   assert.deepEqual(splitKeywords('季度材料，经营分析\n财务'), ['季度材料', '经营分析', '财务']);
   assert.deepEqual(validateTaskInput({ name: '', deadline: '' }), { name: '请输入任务名称', deadline: '请选择截止时间' });
   assert.deepEqual(buildTaskInput({ name: ' Q3 材料 ', subjectKeywords: '季度,材料', deadline: '2026-08-15T18:00', pollMinutes: '60', aiEnabled: true }), {
-    name: 'Q3 材料', company_ids: [], subject_keywords: ['季度', '材料'], body_keywords: [], deadline: '2026-08-15T18:00', start_time: '', poll_minutes: 60, save_directory: 'D:\\UniGather\\Materials', filename_template: '{task}_{company}_{filename}', ai_enabled: true,
+    name: 'Q3 材料', material_name: 'Q3 材料', company_ids: [], subject_keywords: ['季度', '材料'], body_keywords: [], deadline: '2026-08-15T18:00', start_time: '', poll_minutes: 60, save_directory: 'D:\\UniGather\\Materials', filename_template: '{task}_{company}_{filename}', ai_enabled: true,
   });
   assert.deepEqual(buildTaskInput({ name: '补查任务', startTime: '2026-08-01T09:00', deadline: '2026-08-15T18:00' }).start_time, '2026-08-01T09:00');
   assert.equal(validateTaskInput({ name: '任务', startTime: '2026-08-16T09:00', deadline: '2026-08-15T18:00' }).startTime, '起始时间不能晚于截止时间');
   assert.equal(taskStatusLabel('paused'), '已暂停');
 });
 
+test('defaults the task material name to the task name and preserves a custom name', () => {
+  assert.equal(buildTaskInput({ name: '2026报名表', deadline: '2026-08-20T18:00' }).material_name, '2026报名表');
+  assert.equal(buildTaskInput({ name: '2026报名表', materialName: '数据安全报名表', deadline: '2026-08-20T18:00' }).material_name, '数据安全报名表');
+});
+
 test('calculates task progress for the task detail view', () => {
   assert.equal(taskProgressPercent({ total_companies: 10, confirmed_companies: 3 }), 30);
   assert.equal(taskProgressPercent({ total_companies: 0, confirmed_companies: 0 }), 0);
+});
+
+test('builds export rows for every task company that has not confirmed feedback', () => {
+  const rows = buildPendingFeedbackExportRows({ name: '报名表', deadline: '2026-08-20T18:00' }, [
+    { companyName: '陕西省分公司', feedbackStatus: 'pending', contacts: [{ contactName: '张三', email: 'zhang@example.com', phone: '010-1' }] },
+    { companyName: '北京分公司', feedbackStatus: 'needs_review', contacts: [{ contactName: '李四', email: 'li@example.com', phone: '' }] },
+    { companyName: '总部', feedbackStatus: 'confirmed', contacts: [{ contactName: '王五', email: 'wang@example.com', phone: '' }] },
+  ]);
+  assert.deepEqual(normalizePendingFeedbackCompanies([{ companyName: '总部', feedbackStatus: 'confirmed' }, { companyName: '陕西省分公司', feedbackStatus: 'pending' }]).map((item) => item.companyName), ['陕西省分公司']);
+  assert.deepEqual(rows, [
+    { 序号: 1, 任务名称: '报名表', 单位名称: '陕西省分公司', 反馈状态: '待反馈', 联系人: '张三', 邮箱: 'zhang@example.com', 电话: '010-1', 截止时间: '2026-08-20T18:00' },
+    { 序号: 2, 任务名称: '报名表', 单位名称: '北京分公司', 反馈状态: '待确认', 联系人: '李四', 邮箱: 'li@example.com', 电话: '', 截止时间: '2026-08-20T18:00' },
+  ]);
+});
+
+test('paginates task match mail and filters drilldown views by feedback state', () => {
+  const messages = Array.from({ length: 31 }, (_, index) => ({ id: `m-${index + 1}`, status: index < 2 ? 'confirmed' : index < 4 ? 'needs_review' : 'unmatched' }));
+  assert.deepEqual(paginateTaskMatches(messages, 3, 20), { items: messages.slice(20), page: 2, pageSize: 20, total: 31, pageCount: 2 });
+  assert.deepEqual(drilldownItems('unmatched', messages, []).map((item) => item.id), messages.slice(4).map((item) => item.id));
+  assert.deepEqual(drilldownItems('confirmed', messages, [{ companyName: '陕西', feedbackStatus: 'confirmed' }, { companyName: '北京', feedbackStatus: 'pending' }]).map((item) => item.companyName), ['陕西']);
+});
+
+test('labels confirmed feedback distinctly from pending feedback', () => {
+  assert.equal(pendingFeedbackStatusLabel('confirmed'), '已反馈');
+  assert.equal(pendingFeedbackStatusLabel('pending'), '待反馈');
+  assert.equal(pendingFeedbackStatusLabel('needs_review'), '待确认');
+});
+
+test('normalizes the global dashboard summary without mixing task progress', () => {
+  assert.deepEqual(normalizeDashboardSummary({ collectionTaskCount: 4, activeCollectionTasks: 2, sendBatchCount: 3, todayReceived: 11, todaySentSuccess: 8, todaySentFailure: 1 }), {
+    collectionTaskCount: 4, activeCollectionTasks: 2, sendBatchCount: 3, todayReceived: 11, todaySentSuccess: 8, todaySentFailure: 1, latestReceiveStatus: '暂无收件记录', recentEvents: [],
+  });
+});
+
+test('includes global dashboard, task feedback and material naming controls', () => {
+  const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  for (const id of ['dashboard-collection-count', 'dashboard-send-batch-count', 'dashboard-received-today', 'dashboard-sent-today', 'dashboard-workspaces', 'dashboard-activity', 'task-summary-grid', 'task-feedback-select', 'task-feedback-panel', 'export-pending-companies', 'task-match-page-size', 'task-match-pagination', 'task-feedback-drilldown-modal', 'task-material-name']) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.doesNotMatch(html, /id="dashboard-task-banner"/);
+  const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.match(main, /#new-task-2'\)\?\.addEventListener\('click', \(\) => openTaskModal\(\)\)/);
 });
 
 test('compares release versions and selects a UniGather installer', () => {
@@ -192,4 +249,197 @@ test('compares release versions and selects a UniGather installer', () => {
 test('formats update download progress for known and unknown file sizes', () => {
   assert.equal(formatDownloadProgress(512, 1024), '50%');
   assert.equal(formatDownloadProgress(1536, 0), '1.5 KB');
+});
+
+test('deduplicates contacts into selectable company options', () => {
+  assert.deepEqual(normalizeCompanyOptions([
+    { id: 'company-a', name: '北桥公司', contact_name: '张三', email: 'a@north.example' },
+    { id: 'company-a', name: '北桥公司', contact_name: '李四', email: 'b@north.example' },
+    { id: 'company-b', name: '华东中心', contact_name: '王五', email: 'east@example' },
+  ]), [
+    { id: 'company-a', name: '北桥公司', contacts: ['张三', '李四'], emails: ['a@north.example', 'b@north.example'], phones: [], aliases: [], emailCount: 2 },
+    { id: 'company-b', name: '华东中心', contacts: ['王五'], emails: ['east@example'], phones: [], aliases: [], emailCount: 1 },
+  ]);
+  assert.deepEqual(normalizeCompanyOptions([{ id: 'a', name: '北桥', contacts: ['张三'], email_count: 3 }]), [
+    { id: 'a', name: '北桥', contacts: ['张三'], emails: [], phones: [], aliases: [], emailCount: 3 },
+  ]);
+});
+
+test('filters companies and toggles all selected ids', () => {
+  const options = normalizeCompanyOptions([{ id: 'a', name: '北桥', contact_name: '张三', email: 'a@example' }, { id: 'b', name: '华东', contact_name: '李四', email: 'b@example' }]);
+  assert.deepEqual(filterCompanyOptions(options, '张三').map((item) => item.id), ['a']);
+  assert.deepEqual(toggleAllCompanyIds(options, []), ['a', 'b']);
+  assert.deepEqual(toggleAllCompanyIds(options, ['a', 'b']), []);
+  assert.deepEqual(validateCompanySelection([], options), { companyIds: '请至少选择一家单位' });
+  assert.deepEqual(validateCompanySelection(['a'], options), {});
+  assert.deepEqual(validateCompanySelection([], []), { companyIds: '请先在“通讯录”导入单位清单' });
+});
+
+test('limits task refresh to its inclusive start and end window', () => {
+  assert.equal(isWithinSyncWindow('2026-08-10T09:00:00Z', '2026-08-10T09:00:00Z', '2026-08-10T10:00:00Z'), true);
+  assert.equal(isWithinSyncWindow('2026-08-10T10:00:01Z', '2026-08-10T09:00:00Z', '2026-08-10T10:00:00Z'), false);
+  assert.equal(normalizeSyncEnd('2026-08-11T09:00:00Z', new Date('2026-08-10T09:00:00Z')), '2026-08-10T09:00:00.000Z');
+});
+
+test('matches a task message to one selected company and returns the feedback update', () => {
+  assert.deepEqual(matchMessageToCompanyTask({ sender: 'finance@example.com', subject: '报名表反馈', body: '已提交' }, {
+    subjectKeywords: ['报名'], bodyKeywords: [], companies: [{ id: 'company-a', emails: ['finance@example.com'] }],
+  }), { status: 'confirmed', companyId: 'company-a', reason: 'sender_and_subject' });
+  assert.equal(matchMessageToCompanyTask({ sender: 'other@example.com', subject: '报名', body: '' }, {
+    subjectKeywords: ['报名'], bodyKeywords: [], companies: [{ id: 'company-a', emails: ['finance@example.com'] }],
+  }).status, 'unmatched');
+});
+
+test('builds readable company row metadata for the redesigned picker', () => {
+  assert.deepEqual(formatCompanyOptionMeta({ contacts: ['张三', '李四'], emails: ['a@example.com', 'b@example.com'], emailCount: 2 }), {
+    contactLabel: '张三、李四', emailLabel: '2 个邮箱',
+  });
+});
+
+test('builds editable time presets and validates the selected range', () => {
+  const now = new Date('2026-08-10T10:30:00+08:00');
+  assert.deepEqual(buildTimePresetRange('last7days', now), { start: '2026-08-03T10:30', end: '2026-08-10T10:30' });
+  assert.deepEqual(validateTimeRange('2026-08-10T11:00', '2026-08-10T10:30'), { startTime: '起始时间不能晚于截止时间' });
+  assert.deepEqual(validateTimeRange('2026-08-10T09:00', '2026-08-10T10:30'), {});
+});
+
+test('allows a blank password when an existing credential is present', () => {
+  const values = { protocol: 'IMAP', host: 'imap.example.com', port: 993, username: 'user@example.com', password: '' };
+  assert.deepEqual(validateMailboxSave(values, true), {});
+  assert.equal(validateMailboxSave(values, false).password, '请输入账号密码');
+});
+
+test('calculates the last and next automatic receive times for an active task', () => {
+  const now = Date.parse('2026-08-10T10:00:00+08:00');
+  const last = Date.parse('2026-08-10T09:30:00+08:00');
+  const schedule = getTaskSchedule({ status: 'active', poll_minutes: 30 }, last, now);
+
+  assert.deepEqual(schedule, {
+    lastSyncAt: last,
+    nextSyncAt: Date.parse('2026-08-10T10:00:00+08:00'),
+    stopped: false,
+  });
+  assert.equal(formatTaskScheduleTime(schedule.lastSyncAt), '2026/8/10 09:30');
+  assert.equal(formatTaskScheduleCountdown(schedule.nextSyncAt, now), '现在');
+
+  const scheduled = getTaskSchedule({ status: 'active', poll_minutes: 30 }, null, now, Date.parse('2026-08-10T09:45:00+08:00'));
+  assert.equal(scheduled.lastSyncAt, null);
+  assert.equal(scheduled.nextSyncAt, Date.parse('2026-08-10T10:15:00+08:00'));
+});
+
+test('uses task creation time when no receive has happened and stops after deadline', () => {
+  const now = Date.parse('2026-08-10T10:00:00+08:00');
+  const created = '2026-08-10T09:00:00+08:00';
+  const pending = getTaskSchedule({ status: 'active', poll_minutes: 60, created_at: created }, null, now);
+  assert.equal(pending.lastSyncAt, null);
+  assert.equal(pending.nextSyncAt, Date.parse('2026-08-10T10:00:00+08:00'));
+  assert.equal(formatTaskScheduleTime(pending.lastSyncAt), '尚未收件');
+
+  const stopped = getTaskSchedule({ status: 'active', poll_minutes: 30, deadline: '2026-08-10T09:59:00+08:00' }, now - 30 * 60 * 1000, now);
+  assert.deepEqual(stopped, { lastSyncAt: now - 30 * 60 * 1000, nextSyncAt: null, stopped: true });
+  assert.equal(formatTaskScheduleCountdown(stopped.nextSyncAt, now), '已停止');
+});
+
+test('runs one initial sync for an active historical task that has never received mail', () => {
+  const now = Date.parse('2026-08-13T10:00:00+08:00');
+  const task = { status: 'active', start_time: '2026-08-06T10:00', deadline: '2026-08-10T10:00' };
+  assert.equal(shouldRunInitialTaskSync(task, null, now), true);
+  assert.equal(shouldRunInitialTaskSync(task, Date.parse('2026-08-13T09:50:00+08:00'), now), false);
+  assert.equal(shouldRunInitialTaskSync({ ...task, status: 'paused' }, null, now), false);
+  assert.deepEqual(getTaskSchedule({ ...task, poll_minutes: 30 }, null, now), { lastSyncAt: null, nextSyncAt: now, stopped: false });
+});
+
+test('builds point-to-point send targets without mixing company recipients', () => {
+  const targets = normalizeSendTargets([
+    { id: 'c1', name: '甲公司', emails: ['a@example.com', 'a@example.com'] },
+    { id: 'c2', name: '乙公司', emails: ['b@example.com'] },
+  ], ['c2', 'c1']);
+
+  assert.deepEqual(targets, [
+    { companyId: 'c1', companyName: '甲公司', recipients: ['a@example.com'] },
+    { companyId: 'c2', companyName: '乙公司', recipients: ['b@example.com'] },
+  ]);
+  assert.equal(formatSendProgress({ processed: 1, total: 2, success: 1, failure: 0, currentCompany: '甲公司' }), '已发送 1 / 2 封 · 成功 1 · 失败 0 · 当前：甲公司');
+});
+
+test('validates send configuration and requires formal confirmation after test send', () => {
+  const targets = [{ companyId: 'c1', companyName: '甲公司', recipients: ['a@example.com'] }];
+  const base = { taskId: 'task-1', smtpHost: 'smtp.example.com', smtpPort: '465', encryption: 'SSL/TLS', username: 'sender@example.com', subject: '通知', body: '正文', testRecipient: 'test@example.com' };
+  assert.deepEqual(validateSendForm(base, targets, 'test'), { errors: {}, warnings: [] });
+  const formal = validateSendForm({ ...base, testConfirmed: false }, targets, 'formal');
+  assert.equal(formal.errors.testConfirmed, '请先完成测试发送并确认结果');
+  const duplicate = validateSendForm(base, [{ companyId: 'c1', companyName: '甲公司', recipients: ['same@example.com'] }, { companyId: 'c2', companyName: '乙公司', recipients: ['same@example.com'] }], 'test');
+  assert.equal(duplicate.warnings[0].code, 'duplicate_recipient');
+  assert.deepEqual(buildSendPayload({ taskId: 'task-1', smtpHost: 'smtp.example.com', smtpPort: '465', encryption: 'SSL/TLS', username: 'sender@example.com', senderName: '总部', subject: '通知', body: '正文', includeAttachments: true }, targets), {
+    taskId: 'task-1', smtpHost: 'smtp.example.com', smtpPort: 465, encryption: 'SSL/TLS', username: 'sender@example.com', senderName: '总部', subject: '通知', body: '正文', includeAttachments: true, companyIds: ['c1'],
+  });
+});
+
+test('matches independent send batch files by unit name and alias', () => {
+  const items = buildSendBatchItems([
+    { id: 'f1', name: '北桥公司_季度材料.xlsx', path: 'D:/北桥公司_季度材料.xlsx' },
+    { id: 'f2', name: 'EastAlias材料.pdf', path: 'D:/EastAlias材料.pdf' },
+    { id: 'f3', name: '未知材料.txt', path: 'D:/未知材料.txt' },
+  ], [
+    { id: 'a', name: '北桥公司', aliases: [], emails: ['a@example.com'] },
+    { id: 'b', name: '华东中心', aliases: ['EastAlias'], emails: ['b@example.com'] },
+  ]);
+  assert.equal(items[0].status, 'matched');
+  assert.equal(items[0].matchMethod, 'name_exact');
+  assert.equal(items[1].status, 'matched');
+  assert.equal(items[1].matchMethod, 'alias_exact');
+  assert.equal(items[2].status, 'unmatched');
+});
+
+test('groups independent send batch attachments and validates unresolved items', () => {
+  const items = [
+    { id: '1', fileName: 'a.xlsx', filePath: 'D:/a.xlsx', companyId: 'a', companyName: '北桥', recipients: ['a@example.com'], status: 'matched' },
+    { id: '2', fileName: 'b.pdf', filePath: 'D:/b.pdf', companyId: 'a', companyName: '北桥', recipients: ['a@example.com', 'b@example.com'], status: 'matched' },
+    { id: '3', fileName: 'c.txt', filePath: 'D:/c.txt', companyId: '', companyName: '', recipients: [], status: 'needs_review' },
+  ];
+  const grouped = groupSendBatchItems(items);
+  assert.equal(grouped.length, 1);
+  assert.deepEqual(grouped[0].recipients, ['a@example.com', 'b@example.com']);
+  assert.equal(grouped[0].attachments.length, 2);
+  assert.equal(validateSendBatch(items, { subject: '通知', body: '正文' }).errors[0], '还有 1 个附件需要人工确认');
+  assert.deepEqual(parseBatchCc('a@example.com; b@example.com，a@example.com'), ['a@example.com', 'b@example.com']);
+});
+
+test('normalizes structured company contacts into selectable emails and names', () => {
+  const options = normalizeCompanyOptions([{ id: 'c1', name: '重庆', contacts: [
+    { id: 'p1', contactName: '王珂', email: 'wang@example.com', phone: '10086' },
+    { id: 'p2', contactName: '李敏', email: 'li@example.com', phone: '' },
+  ], aliases: ['重庆联通'] }]);
+  assert.deepEqual(options[0].contacts, ['王珂', '李敏']);
+  assert.deepEqual(options[0].emails, ['wang@example.com', 'li@example.com']);
+  assert.equal(options[0].emailCount, 2);
+});
+
+test('blocks sending when persisted batch item count differs from the page', () => {
+  assert.deepEqual(validateBatchPersistence([{ id: 'a' }, { id: 'b' }], { itemCount: 1 }), {
+    ok: false,
+    message: '批次保存不完整：页面有 2 个附件，数据库仅保存 1 个',
+  });
+  assert.deepEqual(validateBatchPersistence([{ id: 'a' }, { id: 'b' }], { itemCount: 2 }), {
+    ok: true,
+    message: '',
+  });
+});
+
+test('appends the configured signature to the outgoing body exactly once', () => {
+  assert.equal(composeSendBody('请查收材料。', '中国联通总部数据安全工作组'), '请查收材料。\n\n中国联通总部数据安全工作组');
+  assert.equal(composeSendBody('请查收材料。\n\n中国联通总部数据安全工作组', '中国联通总部数据安全工作组'), '请查收材料。\n\n中国联通总部数据安全工作组');
+  assert.equal(composeSendBody('请查收材料。', ''), '请查收材料。');
+});
+
+test('provides an explicit label and detail for every send match status', () => {
+  assert.deepEqual(sendItemStatusMeta('matched', ''), { label: '已匹配', tone: 'success', detail: '可以发送' });
+  assert.equal(sendItemStatusMeta('needs_review', '单位没有有效邮箱').label, '待确认');
+  assert.equal(sendItemStatusMeta('unmatched', '').detail, '未找到对应单位');
+  assert.equal(sendItemStatusMeta('ignored', '').label, '已忽略');
+});
+
+test('includes signature, send history detail and task match visibility controls in the desktop UI', () => {
+  const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  ['id="send-signature"', 'id="save-default-signature"', 'id="send-history-detail-modal"', 'id="task-match-list"', 'id="task-match-filter"'].forEach((marker) => assert.ok(html.includes(marker), marker));
 });

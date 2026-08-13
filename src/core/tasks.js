@@ -22,6 +22,7 @@ export function validateTaskInput(values) {
 export function buildTaskInput(values) {
   return {
     name: String(values.name ?? '').trim(),
+    material_name: String(values.materialName ?? '').trim() || String(values.name ?? '').trim(),
     company_ids: Array.isArray(values.companyIds) ? values.companyIds : [],
     subject_keywords: splitKeywords(values.subjectKeywords),
     body_keywords: splitKeywords(values.bodyKeywords),

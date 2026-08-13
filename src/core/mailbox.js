@@ -20,6 +20,12 @@ export function validateMailboxForm(values) {
   return errors;
 }
 
+export function validateMailboxSave(values, credentialPresent = false) {
+  const errors = validateMailboxForm(values);
+  if (credentialPresent && !String(values.password ?? '').trim()) delete errors.password;
+  return errors;
+}
+
 export function buildMailboxPayload(values) {
   return {
     name: String(values.name ?? '').trim() || '总部收件箱',
@@ -29,6 +35,10 @@ export function buildMailboxPayload(values) {
     username: String(values.username ?? '').trim(),
     password_key: String(values.username ?? '').trim(),
     encryption: String(values.encryption ?? 'SSL/TLS'),
+    smtp_host: String(values.smtpHost ?? '').trim(),
+    smtp_port: Number(values.smtpPort) || 465,
+    smtp_encryption: String(values.smtpEncryption ?? 'SSL/TLS'),
+    smtp_sender_name: String(values.smtpSenderName ?? '').trim(),
     proxy_url: values.useProxy ? String(values.proxyUrl ?? '').trim() : '',
     enabled: true,
   };
@@ -45,5 +55,9 @@ export function buildMailboxStorage(values) {
     proxyHost: String(values.proxyHost ?? '').trim(),
     proxyPort: Number(values.proxyPort) || 0,
     proxyUsername: String(values.proxyUsername ?? '').trim(),
+    smtpHost: payload.smtp_host,
+    smtpPort: payload.smtp_port,
+    smtpEncryption: payload.smtp_encryption,
+    smtpSenderName: payload.smtp_sender_name,
   };
 }

@@ -24,12 +24,14 @@ function parseCompanyMatrixRows(header, rows) {
   const nameIndex = header.findIndex((cell) => /单位|公司|名称/i.test(cell));
   const contactNameIndex = header.findIndex((cell) => /姓名|联系人/i.test(cell));
   const emailIndex = header.findIndex((cell) => /邮箱|email/i.test(cell));
+  const phoneIndex = header.findIndex((cell) => /电话|手机|phone|tel/i.test(cell));
+  const aliasIndex = header.findIndex((cell) => /别名|简称|alias/i.test(cell));
   if (nameIndex < 0 || emailIndex < 0) throw new Error('导入文件必须包含单位名称和邮箱列');
   return rows.filter((row) => row.some((cell) => String(cell ?? '').trim())).map((row) => {
     const cells = row.map((cell) => String(cell ?? '').trim());
     const emails = cells[emailIndex].split(/[;；\s]+/).map((email) => email.trim()).filter(Boolean);
     if (!cells[nameIndex] || emails.length === 0) throw new Error('存在缺少单位名称或邮箱的行');
-    return { name: cells[nameIndex], contactName: contactNameIndex >= 0 ? cells[contactNameIndex] : '', emails };
+    return { name: cells[nameIndex], contactName: contactNameIndex >= 0 ? cells[contactNameIndex] : '', emails, phone: phoneIndex >= 0 ? cells[phoneIndex] : '', aliases: aliasIndex >= 0 ? cells[aliasIndex].split(/[;,，；、]+/).map((alias) => alias.trim()).filter(Boolean) : [] };
   });
 }
 

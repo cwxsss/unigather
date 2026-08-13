@@ -55,6 +55,57 @@ where
     }
 }
 
+pub fn test_connection(config: &MailboxConfig) -> Result<(), String> {
+    if config.host.trim().is_empty() || config.port == 0 || config.username.trim().is_empty() {
+        return Err("收件服务器、端口和账号不能为空".to_string());
+    }
+    if config.password.trim().is_empty() {
+        return Err("收件账号尚未保存密码".to_string());
+    }
+    match config.protocol.to_ascii_uppercase().as_str() {
+        "IMAP" => {
+            if !config.encryption.to_ascii_uppercase().contains("SSL") {
+                return Err("IMAP 连接测试目前要求 SSL/TLS".to_string());
+            }
+            let tls = TlsConnector::builder()
+                .build()
+                .map_err(|error| format!("TLS 初始化失败：{error}"))?;
+            let stream = proxy::connect(config)?;
+            let tls_stream = tls
+                .connect(config.host.trim(), stream)
+                .map_err(|error| format!("IMAP TLS 握手失败：{error}"))?;
+            let mut client = imap::Client::new(tls_stream);
+            client
+                .read_greeting()
+                .map_err(|error| format!("读取 IMAP 欢迎信息失败：{error}"))?;
+            let mut session = client
+                .login(&config.username, &config.password)
+                .map_err(|error| format!("IMAP 登录失败：{}", error.0))?;
+            session
+                .logout()
+                .map_err(|error| format!("IMAP 退出失败：{error}"))
+        }
+        "POP3" => {
+            if !config.encryption.to_ascii_uppercase().contains("SSL") {
+                return Err("POP3 连接测试目前要求 SSL/TLS".to_string());
+            }
+            let stream = proxy::connect(config)?;
+            let tls = TlsConnector::builder()
+                .build()
+                .map_err(|error| format!("TLS 初始化失败：{error}"))?;
+            let stream = tls
+                .connect(config.host.trim(), stream)
+                .map_err(|error| format!("POP3 TLS 握手失败：{error}"))?;
+            let mut connection = Pop3Client { stream };
+            connection.read_status("读取 POP3 欢迎信息")?;
+            connection.command_status(&format!("USER {}\r\n", config.username), "POP3 用户认证")?;
+            connection.command_status(&format!("PASS {}\r\n", config.password), "POP3 密码认证")?;
+            connection.command_status("QUIT\r\n", "POP3 退出")
+        }
+        _ => Err("仅支持 IMAP 和 POP3 收件协议".to_string()),
+    }
+}
+
 fn fetch_imap<F>(
     config: &MailboxConfig,
     since: DateTime<Utc>,
