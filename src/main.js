@@ -207,7 +207,7 @@ function renderTasks() {
     remove.addEventListener('click', () => deleteTask(task));
     actions.append(open, remove);
     row.addEventListener('click', (event) => { if (!event.target.closest('button')) openTaskDetail(task); });
-    row.append(badge, detail, status, progress, actions);
+    row.append(badge, detail, progress, status, actions);
     list.append(row);
   });
   void renderTaskFeedbackPanel(selectedTaskSummaryId);
@@ -675,6 +675,7 @@ function openTaskModal(task = null) {
     document.querySelector('#task-name').value = task.name ?? '';
     document.querySelector('#task-material-name').value = task.material_name ?? task.name ?? '';
     document.querySelector('#task-subject-keywords').value = (task.subject_keywords ?? []).join(', ');
+    document.querySelector('#task-body-keywords').value = (task.body_keywords ?? []).join(', ');
     document.querySelector('#task-deadline').value = task.deadline ?? '';
     document.querySelector('#task-poll-minutes').value = String(task.poll_minutes ?? 30);
     document.querySelector('#task-ai-enabled').checked = Boolean(task.ai_enabled);
@@ -732,7 +733,7 @@ function initTaskTimeRange() {
 
 async function saveTask(event) {
   event.preventDefault();
-  const values = { name: document.querySelector('#task-name')?.value, materialName: document.querySelector('#task-material-name')?.value, subjectKeywords: document.querySelector('#task-subject-keywords')?.value, startTime: document.querySelector('#task-start-time')?.value, deadline: document.querySelector('#task-deadline')?.value, pollMinutes: document.querySelector('#task-poll-minutes')?.value, saveDirectory: readMaterialPath(), aiEnabled: document.querySelector('#task-ai-enabled')?.checked, companyIds: selectedCompanyIds };
+  const values = { name: document.querySelector('#task-name')?.value, materialName: document.querySelector('#task-material-name')?.value, subjectKeywords: document.querySelector('#task-subject-keywords')?.value, bodyKeywords: document.querySelector('#task-body-keywords')?.value, startTime: document.querySelector('#task-start-time')?.value, deadline: document.querySelector('#task-deadline')?.value, pollMinutes: document.querySelector('#task-poll-minutes')?.value, saveDirectory: readMaterialPath(), aiEnabled: document.querySelector('#task-ai-enabled')?.checked, companyIds: selectedCompanyIds };
   const errors = { ...validateTaskInput(values), ...validateTimeRange(values.startTime, values.deadline), ...validateCompanySelection(selectedCompanyIds, companyOptions) };
   if (Object.keys(errors).length) { notify(Object.values(errors)[0], 'error'); return; }
   const input = buildTaskInput(values);

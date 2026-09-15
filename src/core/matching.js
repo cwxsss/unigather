@@ -21,9 +21,15 @@ export function matchMessageToTask(message, taskOrTasks) {
 
   const task = matches[0];
   const details = matchesTask(message, task);
+  const subjectKeywords = task.subjectKeywords ?? [];
+  const bodyKeywords = task.bodyKeywords ?? [];
   const result = {
     status: 'confirmed',
-    reason: details.senderMatches && details.subjectMatches ? 'sender_and_subject' : 'rule_match',
+    reason: details.senderMatches && subjectKeywords.length
+      ? 'sender_and_subject'
+      : details.senderMatches && bodyKeywords.length
+        ? 'sender_and_body'
+        : 'rule_match',
   };
   if (task.id) result.taskId = task.id;
   return result;

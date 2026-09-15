@@ -37,6 +37,36 @@ test('matches sender mapping and fuzzy subject rule', () => {
   assert.deepEqual(result, { status: 'confirmed', reason: 'sender_and_subject' });
 });
 
+test('matches configured keywords in the email body', () => {
+  const matched = matchMessageToTask({
+    sender: 'finance@northbridge.com',
+    subject: '关于2026年度材料反馈',
+    body: '附件已提交，请查收。',
+  }, {
+    subjectKeywords: ['材料'],
+    bodyKeywords: ['已提交'],
+    companyEmails: ['finance@northbridge.com'],
+  });
+  assert.deepEqual(matched, { status: 'confirmed', reason: 'sender_and_subject' });
+
+  const unmatched = matchMessageToTask({
+    sender: 'finance@northbridge.com',
+    subject: '关于2026年度材料反馈',
+    body: '正在整理中。',
+  }, {
+    subjectKeywords: ['材料'],
+    bodyKeywords: ['已提交'],
+    companyEmails: ['finance@northbridge.com'],
+  });
+  assert.deepEqual(unmatched, { status: 'unmatched', taskIds: [] });
+});
+
+test('reports body-only matching when the subject rule is blank', () => {
+  assert.deepEqual(matchMessageToTask({ sender: 'unit@example.com', subject: '反馈', body: '已提交材料' }, {
+    subjectKeywords: [], bodyKeywords: ['已提交'], companyEmails: ['unit@example.com'],
+  }), { status: 'confirmed', reason: 'sender_and_body' });
+});
+
 test('routes ambiguous task matches to manual review', () => {
   const result = matchMessageToTask({
     sender: 'unit@example.com',
@@ -179,8 +209,8 @@ test('validates mailbox form and keeps password out of the payload', () => {
 test('builds a normalized task payload from the create form', () => {
   assert.deepEqual(splitKeywords('季度材料，经营分析\n财务'), ['季度材料', '经营分析', '财务']);
   assert.deepEqual(validateTaskInput({ name: '', deadline: '' }), { name: '请输入任务名称', deadline: '请选择截止时间' });
-  assert.deepEqual(buildTaskInput({ name: ' Q3 材料 ', subjectKeywords: '季度,材料', deadline: '2026-08-15T18:00', pollMinutes: '60', aiEnabled: true }), {
-    name: 'Q3 材料', material_name: 'Q3 材料', company_ids: [], subject_keywords: ['季度', '材料'], body_keywords: [], deadline: '2026-08-15T18:00', start_time: '', poll_minutes: 60, save_directory: 'D:\\UniGather\\Materials', filename_template: '{task}_{company}_{filename}', ai_enabled: true,
+  assert.deepEqual(buildTaskInput({ name: ' Q3 材料 ', subjectKeywords: '季度,材料', bodyKeywords: '已提交，附件', deadline: '2026-08-15T18:00', pollMinutes: '60', aiEnabled: true }), {
+    name: 'Q3 材料', material_name: 'Q3 材料', company_ids: [], subject_keywords: ['季度', '材料'], body_keywords: ['已提交', '附件'], deadline: '2026-08-15T18:00', start_time: '', poll_minutes: 60, save_directory: 'D:\\UniGather\\Materials', filename_template: '{task}_{company}_{filename}', ai_enabled: true,
   });
   assert.deepEqual(buildTaskInput({ name: '补查任务', startTime: '2026-08-01T09:00', deadline: '2026-08-15T18:00' }).start_time, '2026-08-01T09:00');
   assert.equal(validateTaskInput({ name: '任务', startTime: '2026-08-16T09:00', deadline: '2026-08-15T18:00' }).startTime, '起始时间不能晚于截止时间');
@@ -240,6 +270,8 @@ test('includes global dashboard, task feedback and material naming controls', ()
   for (const id of ['dashboard-collection-count', 'dashboard-send-batch-count', 'dashboard-received-today', 'dashboard-sent-today', 'dashboard-workspaces', 'dashboard-activity', 'task-summary-grid', 'task-completed-count', 'task-deleted-count', 'task-management-modal', 'task-management-list', 'task-feedback-select', 'task-feedback-panel', 'task-feedback-drilldown-modal', 'task-material-name']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.match(html, /id="task-body-keywords"/);
+  assert.match(html, /class="task-keyword-grid"/);
   assert.doesNotMatch(html, /id="dashboard-task-banner"/);
   assert.doesNotMatch(html, /id="export-pending-companies"/);
   const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
@@ -249,6 +281,7 @@ test('includes global dashboard, task feedback and material naming controls', ()
   assert.match(main, /task_rename/);
   assert.match(main, /deleteTask\(task, true\)/);
   assert.match(main, /openTaskModal\(task\)/);
+  assert.match(main, /bodyKeywords: document\.querySelector\('\#task-body-keywords'\)/);
   assert.match(html, /task-workbench-body/);
   assert.doesNotMatch(html, /task-detail-mail-pane/);
   assert.doesNotMatch(html, /id="task-match-list"/);
@@ -307,6 +340,9 @@ test('matches a task message to one selected company and returns the feedback up
   assert.equal(matchMessageToCompanyTask({ sender: 'other@example.com', subject: '报名', body: '' }, {
     subjectKeywords: ['报名'], bodyKeywords: [], companies: [{ id: 'company-a', emails: ['finance@example.com'] }],
   }).status, 'unmatched');
+  assert.deepEqual(matchMessageToCompanyTask({ sender: 'finance@example.com', subject: '反馈', body: '已提交材料' }, {
+    subjectKeywords: [], bodyKeywords: ['已提交'], companies: [{ id: 'company-a', emails: ['finance@example.com'] }],
+  }), { status: 'confirmed', companyId: 'company-a', reason: 'sender_and_body' });
 });
 
 test('builds readable company row metadata for the redesigned picker', () => {

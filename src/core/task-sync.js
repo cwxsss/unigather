@@ -38,9 +38,11 @@ export function matchMessageToCompanyTask(message = {}, task = {}) {
   const bodyMatches = includesAny(message.body, task.bodyKeywords);
   if (!candidates.length || !subjectMatches || !bodyMatches) return { status: 'unmatched' };
   if (candidates.length > 1) return { status: 'needs_review', companyIds: candidates.map((company) => company.id) };
+  const subjectKeywords = task.subjectKeywords ?? [];
+  const bodyKeywords = task.bodyKeywords ?? [];
   return {
     status: 'confirmed',
     companyId: candidates[0].id,
-    reason: subjectMatches && sender ? 'sender_and_subject' : 'rule_match',
+    reason: subjectKeywords.length ? 'sender_and_subject' : bodyKeywords.length ? 'sender_and_body' : 'rule_match',
   };
 }
