@@ -1,6 +1,6 @@
 /* Task rule input and compact task-row ordering. */
 .task-keyword-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.task-list-row{grid-template-columns:45px minmax(0,500px) 112px minmax(0,1fr) 32px}
-.task-list-row>.status{justify-self:end}
+.task-list-row{grid-template-columns:45px minmax(0,500px) 112px 70px max-content}
+.task-list-row>.status{justify-self:start}
 .task-list-row>b{white-space:nowrap}
 @media(max-width:720px){.task-keyword-grid{grid-template-columns:1fr}}

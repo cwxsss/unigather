@@ -273,8 +273,8 @@ test('includes global dashboard, task feedback and material naming controls', ()
   }
   assert.match(html, /id="task-body-keywords"/);
   assert.match(html, /class="task-keyword-grid"/);
-  assert.match(taskOverrides, /grid-template-columns:45px minmax\(0,500px\) 112px minmax\(0,1fr\) 32px/);
-  assert.match(taskOverrides, /\.task-list-row>\.status\{justify-self:end\}/);
+  assert.match(taskOverrides, /grid-template-columns:45px minmax\(0,500px\) 112px 70px max-content/);
+  assert.match(taskOverrides, /\.task-list-row>\.status\{justify-self:start\}/);
   assert.doesNotMatch(html, /id="dashboard-task-banner"/);
   assert.doesNotMatch(html, /id="export-pending-companies"/);
   const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
