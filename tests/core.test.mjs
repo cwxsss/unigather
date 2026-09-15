@@ -267,11 +267,14 @@ test('normalizes the global dashboard summary without mixing task progress', () 
 
 test('includes global dashboard, task feedback and material naming controls', () => {
   const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  const taskOverrides = readFileSync(new URL('../src/task-overrides.css', import.meta.url), 'utf8');
   for (const id of ['dashboard-collection-count', 'dashboard-send-batch-count', 'dashboard-received-today', 'dashboard-sent-today', 'dashboard-workspaces', 'dashboard-activity', 'task-summary-grid', 'task-completed-count', 'task-deleted-count', 'task-management-modal', 'task-management-list', 'task-feedback-select', 'task-feedback-panel', 'task-feedback-drilldown-modal', 'task-material-name']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /id="task-body-keywords"/);
   assert.match(html, /class="task-keyword-grid"/);
+  assert.match(taskOverrides, /grid-template-columns:45px minmax\(0,500px\) 112px minmax\(0,1fr\) 32px/);
+  assert.match(taskOverrides, /\.task-list-row>\.status\{justify-self:end\}/);
   assert.doesNotMatch(html, /id="dashboard-task-banner"/);
   assert.doesNotMatch(html, /id="export-pending-companies"/);
   const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
