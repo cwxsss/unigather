@@ -544,7 +544,7 @@ function taskMatchStatus(status) {
 }
 
 function taskMatchReason(reason) {
-  return { sender_and_subject: '发件邮箱与主题均符合', sender_and_body: '发件邮箱与正文均符合', sender_name_and_subject: '发件人名称与主题均符合', sender_name_and_body: '发件人名称与正文均符合', sender_not_in_task: '发件人邮箱或名称不属于所选单位', subject_keyword_mismatch: '主题关键词不符合', body_keyword_mismatch: '正文关键词不符合', multiple_company_matches: '同一发件信息关联多个单位', no_rule_match: '未通过任务规则' }[reason] ?? reason ?? '未记录原因';
+  return { sender_and_subject: '发件邮箱与主题符合', sender_and_body: '发件邮箱与正文符合', sender_name_and_subject: '发件人名称与主题符合', sender_name_and_body: '发件人名称与正文符合', sender_not_in_task: '发件人邮箱或名称不属于所选单位', keyword_mismatch: '主题和正文关键词均未匹配', subject_keyword_mismatch: '主题关键词不符合', body_keyword_mismatch: '正文关键词不符合', multiple_company_matches: '同一发件信息关联多个单位', no_rule_match: '未通过任务规则' }[reason] ?? reason ?? '未记录原因';
 }
 
 async function loadTaskMatchDetail(taskId) {

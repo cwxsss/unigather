@@ -332,11 +332,27 @@ fn find_body(mail: &ParsedMail<'_>) -> Option<String> {
 fn collect_attachments(mail: &ParsedMail<'_>) -> Vec<ParsedAttachment> {
     let mut result = Vec::new();
     let disposition = mail.headers.get_first_value("Content-Disposition");
-    let filename = disposition
+    let disposition_kind = disposition
         .as_deref()
-        .and_then(extract_filename)
-        .or_else(|| mail.ctype.params.get("name").cloned());
-    if let Some(name) = filename {
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or_default();
+    let has_content_id = mail
+        .headers
+        .get_first_value("Content-ID")
+        .is_some_and(|value| !value.trim().is_empty());
+    let is_explicit_attachment = disposition_kind.eq_ignore_ascii_case("attachment");
+    let is_inline = disposition_kind.eq_ignore_ascii_case("inline")
+        || (!is_explicit_attachment && has_content_id);
+    let filename = if is_inline {
+        None
+    } else {
+        disposition
+            .as_deref()
+            .and_then(extract_filename)
+            .or_else(|| mail.ctype.params.get("name").cloned())
+    };
+    if let Some(name) = filename.filter(|value| !value.trim().is_empty()) {
         if let Ok(bytes) = mail.get_body_raw() {
             result.push(ParsedAttachment {
                 name: name.trim().to_string(),
@@ -431,5 +447,50 @@ mod tests {
         assert_eq!(parsed.external_id, "<m-1@example.com>");
         assert_eq!(parsed.sender, "sender@example.com");
         assert_eq!(parsed.body, "Body text");
+    }
+
+    #[test]
+    fn ignores_inline_images_and_keeps_real_attachments() {
+        let raw = br#"From: sender@example.com
+To: team@example.com
+Subject: Feedback
+Date: Sun, 09 Aug 2026 10:00:00 +0800
+Message-ID: <m-2@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed"
+
+--mixed
+Content-Type: multipart/related; boundary="related"
+
+--related
+Content-Type: text/html; charset=utf-8
+
+<html><body><img src="cid:logo"></body></html>
+--related
+Content-Type: image/png; name="logo.png"
+Content-Disposition: inline; filename="logo.png"
+Content-ID: <logo>
+Content-Transfer-Encoding: base64
+
+aW1hZ2U=
+--related--
+--mixed
+Content-Type: image/jpeg; name="signature.jpg"
+Content-ID: <signature>
+Content-Transfer-Encoding: base64
+
+aW1hZ2U=
+--mixed
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; name="report.xlsx"
+Content-Disposition: attachment; filename="report.xlsx"
+Content-Transfer-Encoding: base64
+
+ZmlsZQ==
+--mixed--
+"#;
+
+        let parsed = parse_message(raw, "fallback".to_string()).expect("parse");
+        assert_eq!(parsed.attachments.len(), 1);
+        assert_eq!(parsed.attachments[0].name, "report.xlsx");
     }
 }

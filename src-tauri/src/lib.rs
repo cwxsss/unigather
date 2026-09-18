@@ -143,10 +143,11 @@ fn mailbox_credentials_status(username: String) -> Result<bool, String> {
     }
     let entry = keyring::Entry::new("com.unigather.app", &format!("mailbox:{username}"))
         .map_err(|error| error.to_string())?;
-    Ok(entry
-        .get_password()
-        .map(|password| !password.trim().is_empty())
-        .unwrap_or(false))
+    match entry.get_password() {
+        Ok(password) => Ok(!password.trim().is_empty()),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(error) => Err(format!("读取 Windows 凭据失败: {error}")),
+    }
 }
 
 #[tauri::command]
@@ -610,6 +611,21 @@ fn mail_signature_save(signature: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
+fn latest_confirmed_message_id(
+    connection: &Connection,
+    task_id: &str,
+    company_id: &str,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT m.message_id FROM matches m JOIN messages msg ON msg.id=m.message_id WHERE m.task_id=?1 AND m.company_id=?2 AND m.status='confirmed' ORDER BY datetime(msg.received_at) DESC,msg.received_at DESC,msg.id DESC LIMIT 1",
+            rusqlite::params![task_id, company_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
 fn load_task_match_detail(
     connection: &Connection,
     task_id: &str,
@@ -620,9 +636,10 @@ fn load_task_match_detail(
         |row| Ok(TaskSyncRunSummary { id: row.get(0)?, status: row.get(1)?, started_at: row.get(2)?, finished_at: row.get(3)?, processed: row.get(4)?, received: row.get(5)?, duplicates: row.get(6)?, matched: row.get(7)?, needs_review: row.get(8)?, error: row.get(9)? }),
     ).optional().map_err(|error| error.to_string())?;
     let mut statement = connection.prepare(
-        "SELECT m.id,msg.sender,msg.subject,msg.received_at,m.status,m.reason,COALESCE(c.name,''),msg.id FROM matches m JOIN messages msg ON msg.id=m.message_id LEFT JOIN companies c ON c.id=m.company_id WHERE m.task_id=?1 ORDER BY msg.received_at DESC",
+        "SELECT m.id,msg.sender,msg.subject,msg.received_at,m.status,m.reason,COALESCE(c.name,''),msg.id,COALESCE(m.company_id,'') FROM matches m JOIN messages msg ON msg.id=m.message_id LEFT JOIN companies c ON c.id=m.company_id WHERE m.task_id=?1 ORDER BY msg.received_at DESC",
     ).map_err(|error| error.to_string())?;
     let raw: Vec<(
+        String,
         String,
         String,
         String,
@@ -642,6 +659,7 @@ fn load_task_match_detail(
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         })
         .map_err(|error| error.to_string())?
@@ -649,25 +667,35 @@ fn load_task_match_detail(
         .map_err(|error| error.to_string())?;
     drop(statement);
     let mut messages = Vec::new();
-    for (id, sender, subject, received_at, status, reason, company_name, message_id) in raw {
-        let attachments = connection
-            .prepare(
-                "SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name",
-            )
-            .map_err(|error| error.to_string())?
-            .query_map(rusqlite::params![message_id], |row| {
-                let saved_path: String = row.get(2)?;
-                Ok(TaskMatchAttachment {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(),
-                    saved_path,
-                    parse_status: row.get(3)?,
+    for (id, sender, subject, received_at, status, reason, company_name, message_id, company_id) in
+        raw
+    {
+        let is_current_feedback = status != "confirmed"
+            || company_id.is_empty()
+            || latest_confirmed_message_id(connection, task_id, &company_id)?.as_deref()
+                == Some(message_id.as_str());
+        let attachments = if is_current_feedback {
+            connection
+                .prepare(
+                    "SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name",
+                )
+                .map_err(|error| error.to_string())?
+                .query_map(rusqlite::params![message_id], |row| {
+                    let saved_path: String = row.get(2)?;
+                    Ok(TaskMatchAttachment {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(),
+                        saved_path,
+                        parse_status: row.get(3)?,
+                    })
                 })
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<TaskMatchAttachment>, _>>()
-            .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<TaskMatchAttachment>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
         messages.push(TaskMatchMessage {
             id,
             message_id,
@@ -755,11 +783,12 @@ fn load_task_feedback_page(
     } else {
         " LIMIT ?3 OFFSET ?4"
     };
-    let query = format!("SELECT m.id,msg.sender,msg.subject,msg.received_at,m.status,m.reason,COALESCE(c.name,''),msg.id FROM matches m JOIN messages msg ON msg.id=m.message_id LEFT JOIN companies c ON c.id=m.company_id WHERE m.task_id=?1{filter_sql} ORDER BY msg.received_at DESC{paging_sql}");
+    let query = format!("SELECT m.id,msg.sender,msg.subject,msg.received_at,m.status,m.reason,COALESCE(c.name,''),msg.id,COALESCE(m.company_id,'') FROM matches m JOIN messages msg ON msg.id=m.message_id LEFT JOIN companies c ON c.id=m.company_id WHERE m.task_id=?1{filter_sql} ORDER BY msg.received_at DESC{paging_sql}");
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| error.to_string())?;
     let raw: Vec<(
+        String,
         String,
         String,
         String,
@@ -780,6 +809,7 @@ fn load_task_feedback_page(
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             })
             .map_err(|error| error.to_string())?
@@ -799,6 +829,7 @@ fn load_task_feedback_page(
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )
@@ -808,13 +839,23 @@ fn load_task_feedback_page(
     };
     drop(statement);
     let mut messages = Vec::with_capacity(raw.len());
-    for (id, sender, subject, received_at, status, reason, company_name, message_id) in raw {
-        let attachments = connection.prepare("SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name")
-            .map_err(|error| error.to_string())?
-            .query_map(rusqlite::params![message_id], |row| {
-                let saved_path: String = row.get(2)?;
-                Ok(TaskMatchAttachment { id: row.get(0)?, name: row.get(1)?, can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(), saved_path, parse_status: row.get(3)? })
-            }).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    for (id, sender, subject, received_at, status, reason, company_name, message_id, company_id) in
+        raw
+    {
+        let is_current_feedback = status != "confirmed"
+            || company_id.is_empty()
+            || latest_confirmed_message_id(connection, task_id, &company_id)?.as_deref()
+                == Some(message_id.as_str());
+        let attachments = if is_current_feedback {
+            connection.prepare("SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name")
+                .map_err(|error| error.to_string())?
+                .query_map(rusqlite::params![message_id], |row| {
+                    let saved_path: String = row.get(2)?;
+                    Ok(TaskMatchAttachment { id: row.get(0)?, name: row.get(1)?, can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(), saved_path, parse_status: row.get(3)? })
+                }).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
         messages.push(TaskMatchMessage {
             id,
             message_id,
@@ -950,21 +991,25 @@ fn load_send_targets(
         }
         let mut attachments = Vec::new();
         if input.include_attachments {
-            let mut statement = connection
-                .prepare(
-                    "SELECT DISTINCT a.original_name,a.saved_path FROM matches m JOIN attachments a ON a.message_id=m.message_id WHERE m.task_id=?1 AND m.company_id=?2 AND m.status='confirmed' AND a.saved_path IS NOT NULL AND a.saved_path != ''",
-                )
-                .map_err(|error| error.to_string())?;
-            for row in statement
-                .query_map(rusqlite::params![input.task_id, company_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(|error| error.to_string())?
+            if let Some(message_id) =
+                latest_confirmed_message_id(connection, &input.task_id, company_id)?
             {
-                let (name, saved_path) = row.map_err(|error| error.to_string())?;
-                let path = PathBuf::from(saved_path);
-                if path.is_file() {
-                    attachments.push(SendAttachment { name, path });
+                let mut statement = connection
+                    .prepare(
+                        "SELECT DISTINCT original_name,saved_path FROM attachments WHERE message_id=?1 AND saved_path IS NOT NULL AND saved_path != ''",
+                    )
+                    .map_err(|error| error.to_string())?;
+                for row in statement
+                    .query_map(rusqlite::params![message_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|error| error.to_string())?
+                {
+                    let (name, saved_path) = row.map_err(|error| error.to_string())?;
+                    let path = PathBuf::from(saved_path);
+                    if path.is_file() {
+                        attachments.push(SendAttachment { name, path });
+                    }
                 }
             }
         }
@@ -2332,8 +2377,8 @@ fn sender_name_candidates<'a>(
 
 fn keyword_match(value: &str, keywords: &[String]) -> bool {
     let normalized = value.to_lowercase();
-    keywords.is_empty()
-        || keywords
+    !keywords.is_empty()
+        && keywords
             .iter()
             .any(|keyword| normalized.contains(&keyword.to_lowercase()))
 }
@@ -2359,9 +2404,17 @@ fn evaluate_task_match(
     } else {
         email_candidates
     };
+    let subject_configured = !rule.subject_keywords.is_empty();
+    let body_configured = !rule.body_keywords.is_empty();
     let subject_matches = keyword_match(&message.subject, &rule.subject_keywords);
     let body_matches = keyword_match(&message.body, &rule.body_keywords);
-    if candidates.is_empty() || !subject_matches || !body_matches {
+    let keywords_match = match (subject_configured, body_configured) {
+        (false, false) => true,
+        (true, false) => subject_matches,
+        (false, true) => body_matches,
+        (true, true) => subject_matches || body_matches,
+    };
+    if candidates.is_empty() || !keywords_match {
         let identified_company = if candidates.len() == 1 {
             Some(candidates[0].id.clone())
         } else {
@@ -2369,7 +2422,9 @@ fn evaluate_task_match(
         };
         let reason = if candidates.is_empty() {
             "sender_not_in_task"
-        } else if !subject_matches {
+        } else if subject_configured && body_configured {
+            "keyword_mismatch"
+        } else if subject_configured {
             "subject_keyword_mismatch"
         } else {
             "body_keyword_mismatch"
@@ -2395,11 +2450,11 @@ fn evaluate_task_match(
     (
         "confirmed".to_string(),
         Some(candidates[0].id.clone()),
-        if matched_by_sender_name && rule.subject_keywords.is_empty() {
+        if matched_by_sender_name && body_matches && !subject_matches {
             "sender_name_and_body".to_string()
         } else if matched_by_sender_name {
             "sender_name_and_subject".to_string()
-        } else if rule.subject_keywords.is_empty() {
+        } else if body_matches && !subject_matches {
             "sender_and_body".to_string()
         } else {
             "sender_and_subject".to_string()
@@ -3195,14 +3250,14 @@ fn production_database_path() -> PathBuf {
 mod tests {
     use super::{
         archive_task_attachment, database_path_for_executable, delete_company_contact,
-        evaluate_task_match, load_dashboard_summary, load_send_history_detail,
+        evaluate_task_match, load_dashboard_summary, load_send_history_detail, load_send_targets,
         load_task_feedback_page, load_task_match_detail, load_task_pending_companies,
         next_unique_id, recompute_task_feedback, replace_send_batch_items, resolve_match,
         restore_task_records, soft_delete_task_records, validate_archived_path,
         validate_task_status, TaskCompanyRule, TaskSyncRule,
     };
     use crate::mail::ParsedMessage;
-    use crate::models::SendBatchItemInput;
+    use crate::models::{SendBatchItemInput, SendInput};
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -3249,6 +3304,44 @@ mod tests {
         );
         assert_eq!(result.0, "confirmed");
         assert_eq!(result.1.as_deref(), Some("company-a"));
+    }
+
+    #[test]
+    fn confirms_company_when_either_subject_or_body_keyword_matches() {
+        let rule = TaskSyncRule {
+            task_id: "task-a".into(),
+            task_name: "任务".into(),
+            material_name: "材料".into(),
+            subject_keywords: vec!["报名".into()],
+            body_keywords: vec!["重要数据".into()],
+            companies: vec![TaskCompanyRule {
+                id: "company-a".into(),
+                name: "单位 A".into(),
+                aliases: Vec::new(),
+                emails: vec!["finance@example.com".into()],
+            }],
+        };
+
+        let subject_result = evaluate_task_match(
+            &message("finance@example.com", "报名表反馈", "普通正文"),
+            &rule,
+        );
+        assert_eq!(subject_result.0, "confirmed");
+        assert_eq!(subject_result.2, "sender_and_subject");
+
+        let body_result = evaluate_task_match(
+            &message("finance@example.com", "普通主题", "包含重要数据材料"),
+            &rule,
+        );
+        assert_eq!(body_result.0, "confirmed");
+        assert_eq!(body_result.2, "sender_and_body");
+
+        let unmatched_result = evaluate_task_match(
+            &message("finance@example.com", "普通主题", "普通正文"),
+            &rule,
+        );
+        assert_eq!(unmatched_result.0, "unmatched");
+        assert_eq!(unmatched_result.2, "keyword_mismatch");
     }
 
     #[test]
@@ -3577,6 +3670,49 @@ mod tests {
             .expect("ignore");
         recompute_task_feedback(&connection, "t").expect("recompute after ignore");
         assert_eq!(feedback_status(&connection, "t", "c1"), "pending");
+    }
+
+    #[test]
+    fn send_targets_use_only_latest_confirmed_feedback_attachments() {
+        let connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        connection.execute("INSERT INTO companies (id,name,aliases,created_at) VALUES ('c1','重庆','[]','now')", []).expect("company");
+        connection.execute("INSERT INTO company_contacts (id,company_id,email,created_at) VALUES ('contact','c1','unit@example.com','now')", []).expect("contact");
+        connection.execute("INSERT INTO tasks (id,name,status,deadline,poll_minutes,save_directory,filename_template,created_at) VALUES ('t','任务','active','2026-08-31',30,'.','旧','now')", []).expect("task");
+        connection.execute("INSERT INTO messages (id,mailbox_id,external_id,sender,recipients,cc,subject,body,received_at,content_hash) VALUES ('old','box','e1','unit@example.com','[]','[]','材料','正文','2026-08-13T09:00:00Z','h1'),('new','box','e2','unit@example.com','[]','[]','材料','正文','2026-08-13T10:00:00Z','h2')", []).expect("messages");
+        connection.execute("INSERT INTO matches (id,message_id,task_id,company_id,status,reason) VALUES ('x1','old','t','c1','confirmed','rule'),('x2','new','t','c1','confirmed','rule')", []).expect("matches");
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        connection.execute("INSERT INTO attachments (id,message_id,original_name,saved_path,parse_status) VALUES ('a1','old','old.docx',?1,'archive_only'),('a2','new','new.docx',?2,'archive_only')", rusqlite::params![manifest.to_string_lossy(), config.to_string_lossy()]).expect("attachments");
+        let input = SendInput {
+            task_id: "t".into(),
+            batch_id: String::new(),
+            smtp_host: String::new(),
+            smtp_port: 0,
+            encryption: String::new(),
+            username: String::new(),
+            sender_name: String::new(),
+            subject: "主题".into(),
+            body: "正文".into(),
+            signature: String::new(),
+            include_attachments: true,
+            company_ids: vec!["c1".into()],
+            cc: Vec::new(),
+            test_recipient: String::new(),
+        };
+
+        let targets = load_send_targets(&connection, &input).expect("send targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].attachments.len(), 1);
+        assert_eq!(targets[0].attachments[0].name, "new.docx");
+
+        let feedback =
+            load_task_feedback_page(&connection, "t", "confirmed", 1, 20).expect("feedback page");
+        assert_eq!(feedback.messages.len(), 2);
+        assert_eq!(feedback.messages[0].message_id, "new");
+        assert_eq!(feedback.messages[0].attachments.len(), 1);
+        assert_eq!(feedback.messages[1].message_id, "old");
+        assert!(feedback.messages[1].attachments.is_empty());
     }
 
     #[test]

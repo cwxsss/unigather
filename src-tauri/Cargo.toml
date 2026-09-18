@@ -1,6 +1,6 @@
 [package]
 name = "unigather"
-version = "0.0.5"
+version = "0.0.8"
 description = "UniGather local material collection desktop application"
 authors = ["UniGather"]
 edition = "2021"
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
-keyring = "3"
+keyring = { version = "3", features = ["windows-native"] }
 imap = "2.4.1"
 mailparse = "0.16.1"
 chrono = { version = "0.4", features = ["clock"] }
