@@ -2375,12 +2375,29 @@ fn sender_name_candidates<'a>(
         .collect()
 }
 
-fn keyword_match(value: &str, keywords: &[String]) -> bool {
+fn keyword_match(value: &str, keywords: &[String]) -> (bool, bool, bool) {
     let normalized = value.to_lowercase();
-    !keywords.is_empty()
-        && keywords
-            .iter()
-            .any(|keyword| normalized.contains(&keyword.to_lowercase()))
+    let mut positive_configured = false;
+    let mut positive_matches = false;
+    let mut excluded = false;
+    for keyword in keywords {
+        let keyword = keyword.trim();
+        if let Some(term) = keyword.strip_prefix('-') {
+            let term = term.trim().to_lowercase();
+            if !term.is_empty() && normalized.contains(&term) {
+                excluded = true;
+            }
+        } else {
+            let term = keyword.strip_prefix('+').unwrap_or(keyword).trim().to_lowercase();
+            if !term.is_empty() {
+                positive_configured = true;
+                if normalized.contains(&term) {
+                    positive_matches = true;
+                }
+            }
+        }
+    }
+    (positive_configured, positive_matches, excluded)
 }
 
 fn evaluate_task_match(
@@ -2406,14 +2423,15 @@ fn evaluate_task_match(
     };
     let subject_configured = !rule.subject_keywords.is_empty();
     let body_configured = !rule.body_keywords.is_empty();
-    let subject_matches = keyword_match(&message.subject, &rule.subject_keywords);
-    let body_matches = keyword_match(&message.body, &rule.body_keywords);
-    let keywords_match = match (subject_configured, body_configured) {
-        (false, false) => true,
-        (true, false) => subject_matches,
-        (false, true) => body_matches,
-        (true, true) => subject_matches || body_matches,
-    };
+    let (subject_has_positive, subject_matches, subject_excluded) =
+        keyword_match(&message.subject, &rule.subject_keywords);
+    let (body_has_positive, body_matches, body_excluded) =
+        keyword_match(&message.body, &rule.body_keywords);
+    let positive_configured = subject_has_positive || body_has_positive;
+    let positive_matches = !positive_configured
+        || (subject_has_positive && subject_matches)
+        || (body_has_positive && body_matches);
+    let keywords_match = positive_matches && !subject_excluded && !body_excluded;
     if candidates.is_empty() || !keywords_match {
         let identified_company = if candidates.len() == 1 {
             Some(candidates[0].id.clone())

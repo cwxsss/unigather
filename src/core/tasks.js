@@ -1,10 +1,48 @@
 const DEFAULT_DIRECTORY = 'D:\\UniGather\\Materials';
 
 export function splitKeywords(value) {
-  return String(value ?? '')
-    .split(/[,，\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const source = String(value ?? '');
+  const keywords = [];
+  let marker = '+';
+  let buffer = '';
+  const flush = () => {
+    const keyword = buffer.trim();
+    if (keyword) keywords.push(`${marker}${keyword}`);
+    buffer = '';
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '\\' && index + 1 < source.length && '+-\\'.includes(source[index + 1])) {
+      buffer += source[index + 1];
+      index += 1;
+    } else if (character === '+' || character === '-') {
+      flush();
+      marker = character;
+    } else if (character === ',' || character === '，' || character === '\n') {
+      flush();
+    } else {
+      buffer += character;
+    }
+  }
+  flush();
+  return keywords;
+}
+
+export function formatKeywords(keywords) {
+  return (Array.isArray(keywords) ? keywords : [])
+    .map((value) => {
+      const keyword = String(value ?? '').trim();
+      if (!keyword) return '';
+      const hasMarker = keyword[0] === '+' || keyword[0] === '-';
+      const marker = hasMarker ? keyword[0] : '+';
+      const term = hasMarker ? keyword.slice(1) : keyword;
+      if (!term) return '';
+      const escaped = term.replace(/\\/g, '\\\\').replace(/[+-]/g, '\\$&');
+      return `${marker}${escaped}`;
+    })
+    .filter(Boolean)
+    .join('');
 }
 
 export function validateTaskInput(values) {

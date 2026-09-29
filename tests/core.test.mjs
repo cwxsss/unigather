@@ -37,7 +37,7 @@ test('matches sender mapping and fuzzy subject rule', () => {
   assert.deepEqual(result, { status: 'confirmed', reason: 'sender_and_subject' });
 });
 
-test('matches configured keywords in the email body', () => {
+test('matches when either configured subject or body keywords match', () => {
   const matched = matchMessageToTask({
     sender: 'finance@northbridge.com',
     subject: '关于2026年度材料反馈',
@@ -58,7 +58,7 @@ test('matches configured keywords in the email body', () => {
     bodyKeywords: ['已提交'],
     companyEmails: ['finance@northbridge.com'],
   });
-  assert.deepEqual(unmatched, { status: 'unmatched', taskIds: [] });
+  assert.deepEqual(unmatched, { status: 'confirmed', reason: 'sender_and_subject' });
 });
 
 test('reports body-only matching when the subject rule is blank', () => {
@@ -207,10 +207,10 @@ test('validates mailbox form and keeps password out of the payload', () => {
 });
 
 test('builds a normalized task payload from the create form', () => {
-  assert.deepEqual(splitKeywords('季度材料，经营分析\n财务'), ['季度材料', '经营分析', '财务']);
+  assert.deepEqual(splitKeywords('季度材料，经营分析\n财务'), ['+季度材料', '+经营分析', '+财务']);
   assert.deepEqual(validateTaskInput({ name: '', deadline: '' }), { name: '请输入任务名称', deadline: '请选择截止时间' });
   assert.deepEqual(buildTaskInput({ name: ' Q3 材料 ', subjectKeywords: '季度,材料', bodyKeywords: '已提交，附件', deadline: '2026-08-15T18:00', pollMinutes: '60', aiEnabled: true }), {
-    name: 'Q3 材料', material_name: 'Q3 材料', company_ids: [], subject_keywords: ['季度', '材料'], body_keywords: ['已提交', '附件'], deadline: '2026-08-15T18:00', start_time: '', poll_minutes: 60, save_directory: 'D:\\UniGather\\Materials', filename_template: '{task}_{company}_{filename}', ai_enabled: true,
+    name: 'Q3 材料', material_name: 'Q3 材料', company_ids: [], subject_keywords: ['+季度', '+材料'], body_keywords: ['+已提交', '+附件'], deadline: '2026-08-15T18:00', start_time: '', poll_minutes: 60, save_directory: 'D:\\UniGather\\Materials', filename_template: '{task}_{company}_{filename}', ai_enabled: true,
   });
   assert.deepEqual(buildTaskInput({ name: '补查任务', startTime: '2026-08-01T09:00', deadline: '2026-08-15T18:00' }).start_time, '2026-08-01T09:00');
   assert.equal(validateTaskInput({ name: '任务', startTime: '2026-08-16T09:00', deadline: '2026-08-15T18:00' }).startTime, '起始时间不能晚于截止时间');

@@ -1,6 +1,6 @@
 import { invokeCommand } from './bridge.js';
 import { buildMailboxPayload, buildMailboxStorage, mailboxDefaults, validateMailboxForm, validateMailboxSave } from './core/mailbox.js';
-import { buildTaskInput, taskStatusLabel, validateTaskInput, normalizeFeedbackPage, nextFeedbackPage } from './core/tasks.js';
+import { buildTaskInput, formatKeywords, taskStatusLabel, validateTaskInput, normalizeFeedbackPage, nextFeedbackPage } from './core/tasks.js';
 import { decodeCsvBuffer, parseCompanyMatrix, parseCompanyRows } from './core/attachments.js';
 import { DEFAULT_MATERIAL_PATH, normalizeMaterialPath } from './core/materials.js';
 import { filterInboxMessages, normalizeInboxMessage, sortInboxMessages } from './core/inbox.js';
@@ -28,7 +28,7 @@ const MATERIAL_PATH_STORAGE_KEY = 'unigather.material-path.v1';
 const AI_CONFIG_STORAGE_KEY = 'unigather.ai-config.v1';
 const TASK_SYNC_STORAGE_KEY = 'unigather.task-sync-times.v1';
 const TASK_LAST_RECEIVE_STORAGE_KEY = 'unigather.task-last-receive.v1';
-const APP_VERSION = '0.0.4';
+const APP_VERSION = '0.0.9';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
 let deletedTasks = [];
@@ -530,8 +530,8 @@ function openTaskDetail(task) {
       });
     }
   }
-  detailModal.querySelector('#task-detail-subject').textContent = (task.subject_keywords ?? []).join('、') || '未设置';
-  detailModal.querySelector('#task-detail-body').textContent = (task.body_keywords ?? []).join('、') || '未设置（不限制正文）';
+  detailModal.querySelector('#task-detail-subject').textContent = formatKeywords(task.subject_keywords) || '未设置（不限制主题）';
+  detailModal.querySelector('#task-detail-body').textContent = formatKeywords(task.body_keywords) || '未设置（不限制正文）';
   detailModal.querySelector('#task-detail-directory').textContent = task.save_directory || readMaterialPath();
   const refreshButton = detailModal.querySelector('#refresh-task-detail');
   if (refreshButton) { refreshButton.disabled = Boolean(activeSyncRunId); refreshButton.textContent = activeSyncTaskId === task.id ? '收件中…' : '↻ 立即刷新'; }
@@ -674,8 +674,8 @@ function openTaskModal(task = null) {
   if (task) {
     document.querySelector('#task-name').value = task.name ?? '';
     document.querySelector('#task-material-name').value = task.material_name ?? task.name ?? '';
-    document.querySelector('#task-subject-keywords').value = (task.subject_keywords ?? []).join(', ');
-    document.querySelector('#task-body-keywords').value = (task.body_keywords ?? []).join(', ');
+    document.querySelector('#task-subject-keywords').value = formatKeywords(task.subject_keywords);
+    document.querySelector('#task-body-keywords').value = formatKeywords(task.body_keywords);
     document.querySelector('#task-deadline').value = task.deadline ?? '';
     document.querySelector('#task-poll-minutes').value = String(task.poll_minutes ?? 30);
     document.querySelector('#task-ai-enabled').checked = Boolean(task.ai_enabled);

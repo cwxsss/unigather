@@ -11,9 +11,21 @@ function senderEmail(value) {
   return normalize(match?.[1] ?? value).replace(/^mailto:/, '');
 }
 
-function includesAny(value, keywords = []) {
+function matchKeywords(value, keywords = []) {
   const normalized = normalize(value);
-  return !keywords.length || keywords.some((keyword) => normalized.includes(normalize(keyword)));
+  const positive = [];
+  const negative = [];
+  keywords.forEach((value) => {
+    const keyword = normalize(value);
+    if (!keyword) return;
+    if (keyword.startsWith('-')) negative.push(keyword.slice(1));
+    else positive.push(keyword.startsWith('+') ? keyword.slice(1) : keyword);
+  });
+  return {
+    positiveConfigured: positive.length > 0,
+    positiveMatches: positive.some((keyword) => keyword && normalized.includes(keyword)),
+    excluded: negative.some((keyword) => keyword && normalized.includes(keyword)),
+  };
 }
 
 export function normalizeSyncEnd(value, now = new Date()) {
@@ -34,15 +46,17 @@ export function isWithinSyncWindow(receivedAt, start, end) {
 export function matchMessageToCompanyTask(message = {}, task = {}) {
   const sender = senderEmail(message.sender);
   const candidates = (task.companies ?? []).filter((company) => (company.emails ?? []).some((email) => senderEmail(email) === sender));
-  const subjectMatches = includesAny(message.subject, task.subjectKeywords);
-  const bodyMatches = includesAny(message.body, task.bodyKeywords);
-  if (!candidates.length || !subjectMatches || !bodyMatches) return { status: 'unmatched' };
+  const subjectRule = matchKeywords(message.subject, task.subjectKeywords);
+  const bodyRule = matchKeywords(message.body, task.bodyKeywords);
+  const positiveConfigured = subjectRule.positiveConfigured || bodyRule.positiveConfigured;
+  const positiveMatches = !positiveConfigured
+    || (subjectRule.positiveConfigured && subjectRule.positiveMatches)
+    || (bodyRule.positiveConfigured && bodyRule.positiveMatches);
+  if (!candidates.length || !positiveMatches || subjectRule.excluded || bodyRule.excluded) return { status: 'unmatched' };
   if (candidates.length > 1) return { status: 'needs_review', companyIds: candidates.map((company) => company.id) };
-  const subjectKeywords = task.subjectKeywords ?? [];
-  const bodyKeywords = task.bodyKeywords ?? [];
   return {
     status: 'confirmed',
     companyId: candidates[0].id,
-    reason: subjectKeywords.length ? 'sender_and_subject' : bodyKeywords.length ? 'sender_and_body' : 'rule_match',
+    reason: subjectRule.positiveMatches ? 'sender_and_subject' : bodyRule.positiveMatches ? 'sender_and_body' : 'rule_match',
   };
 }

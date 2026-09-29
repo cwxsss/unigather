@@ -10,6 +10,7 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 - [Word 版使用手册](docs/UniGather-新手使用操作手册.docx)
 
 - GitHub 项目：<https://github.com/cwxsss/unigather>
+- v0.0.9 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.9>
 - v0.0.8 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.8>
 - v0.0.7 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.7>
 - v0.0.4 发布页：<https://github.com/cwxsss/unigather/releases/tag/v0.0.4>
@@ -26,6 +27,7 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 - **邮箱配置**：配置 IMAP/POP3、服务器、端口、加密方式、账号密码和 HTTP/SOCKS5 代理；支持协议端口联动、密码显示/隐藏、代理展开和连接配置校验。
 - **AI 配置**：在系统设置中配置 API 地址、模型和 API Key；Windows 版本使用凭据管理器保存 API Key。
 - **匹配规则**：按发件人邮箱、主题关键词和正文关键词进行确定性匹配；多任务冲突进入待人工确认逻辑。
+- **关键词规则**：使用 `+关键词 -关键词` 配置；多个 `+` 关键词按“或”匹配，命中任一 `-` 关键词即排除邮件；旧逗号分隔关键词仍按包含词处理。
 - **材料与报表**：材料清单可导出 CSV；附件命名逻辑避免同名覆盖。
 - **本地安全**：任务和单位数据保存在本机 SQLite；浏览器预览模式使用 localStorage 回退；密码不会写入任务数据库或日志。
 - **桌面体验**：深色科技感中文界面、Windows 安装包、最小化到托盘偏好设置入口。
@@ -46,8 +48,8 @@ UniGather 是一款面向公司总部工作人员的 Windows 单机桌面应用�
 
 从 GitHub Release 下载以下任一安装包：
 
-- `UniGather_0.0.8_x64-setup.exe`：NSIS 安装包，适合普通用户。
-- `UniGather_0.0.8_x64_zh-CN.msi`：MSI 安装包，适合企业软件分发。
+- `UniGather_0.0.9_x64-setup.exe`：NSIS 安装包，适合普通用户。
+- `UniGather_0.0.9_x64_zh-CN.msi`：MSI 安装包，适合企业软件分发。
 
 发布版使用 Windows GUI 子系统启动，不会额外弹出黑色控制台窗口。
 

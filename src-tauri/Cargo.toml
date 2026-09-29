@@ -1,6 +1,6 @@
 [package]
 name = "unigather"
-version = "0.0.8"
+version = "0.0.9"
 description = "UniGather local material collection desktop application"
 authors = ["UniGather"]
 edition = "2021"
