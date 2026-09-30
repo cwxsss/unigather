@@ -40,6 +40,14 @@ pub fn initialize(connection: &Connection) -> Result<()> {
           task_id TEXT REFERENCES tasks(id), company_id TEXT REFERENCES companies(id),
           status TEXT NOT NULL, reason TEXT NOT NULL, confidence REAL, reviewed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS material_copies (
+          task_id TEXT NOT NULL REFERENCES tasks(id),
+          attachment_id TEXT NOT NULL REFERENCES attachments(id),
+          history_path TEXT NOT NULL, current_path TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY(task_id, attachment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_material_match ON matches(task_id,status,company_id,message_id);
+        CREATE INDEX IF NOT EXISTS idx_attachment_message ON attachments(message_id);
         CREATE TABLE IF NOT EXISTS match_candidates (
           match_id TEXT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
           company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,

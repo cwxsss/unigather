@@ -323,6 +323,12 @@ pub struct TaskMatchAttachment {
     pub saved_path: String,
     pub parse_status: String,
     pub can_open: bool,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub received_at: String,
+    #[serde(default)]
+    pub history_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +342,8 @@ pub struct TaskMatchMessage {
     pub status: String,
     pub reason: String,
     pub company_name: String,
+    #[serde(default)]
+    pub company_id: String,
     pub attachments: Vec<TaskMatchAttachment>,
 }
 

@@ -4,3 +4,17 @@
 .task-list-row>.status{justify-self:start}
 .task-list-row>b{white-space:nowrap}
 @media(max-width:720px){.task-keyword-grid{grid-template-columns:1fr}}
+.task-directory-picker{display:flex;gap:10px;align-items:center}
+#task-feedback-drilldown-modal{z-index:160}
+.task-directory-picker input{flex:1;min-width:0}
+.task-directory-picker button{flex-shrink:0;white-space:nowrap}
+.current-material-actions .attachment-actions,.material-history-actions .attachment-actions{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.material-history-actions details>div{margin:10px 0;padding-top:8px;border-top:1px solid #29445e}
+@media(max-width:720px){.task-directory-picker{flex-wrap:wrap}}
+.task-company-groups{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.task-group-chip{display:flex!important;align-items:center;gap:7px;padding:7px 10px;border:1px solid #29445e;border-radius:8px;background:#0c263b;cursor:pointer}
+.task-group-chip input{width:auto;margin:0;accent-color:#25d1f3}
+.task-group-manager{margin:8px 0 12px;padding:10px;border:1px solid #29445e;border-radius:8px}
+.task-group-manager summary{cursor:pointer;color:#25d1f3}
+.task-group-manager label{margin-top:10px}
+.task-group-manager .modal-actions{margin-top:10px}

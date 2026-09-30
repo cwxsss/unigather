@@ -1,6 +1,7 @@
 mod archive;
 mod db;
 mod mail;
+mod material_versions;
 mod models;
 mod proxy;
 mod send;
@@ -228,6 +229,9 @@ fn scan_send_directory(
     recursive: bool,
     items: &mut Vec<AttachmentCandidate>,
 ) -> Result<(), String> {
+    if current.join(".unigather-material-view").is_file() {
+        return scan_send_directory(root, &current.join("当前材料"), true, items);
+    }
     for entry in std::fs::read_dir(current).map_err(|error| format!("读取材料目录失败：{error}"))?
     {
         let entry = entry.map_err(|error| format!("读取材料目录项失败：{error}"))?;
@@ -275,11 +279,39 @@ fn next_unique_id(prefix: &str) -> String {
 fn send_batch_scan(
     source_dir: String,
     recursive: bool,
+    state: State<'_, AppState>,
 ) -> Result<Vec<AttachmentCandidate>, String> {
     let root = PathBuf::from(source_dir.trim());
     if !root.is_dir() {
         return Err("材料目录不存在或不是目录".to_string());
     }
+    let connection = state.database.lock().map_err(|error| error.to_string())?;
+    let task_directories = connection
+        .prepare("SELECT id,save_directory FROM tasks WHERE deleted_at IS NULL")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let path_key = |path: &Path| {
+        format!(
+            "{}/",
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_lowercase()
+        )
+    };
+    let selected = path_key(&root);
+    for (id, directory) in task_directories {
+        let configured = path_key(Path::new(&directory));
+        if selected.starts_with(&configured) || configured.starts_with(&selected) {
+            material_versions::refresh_task(&connection, &id)?;
+        }
+    }
+    drop(connection);
     let mut items = Vec::new();
     scan_send_directory(&root, &root, recursive, &mut items)?;
     items.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
@@ -611,19 +643,36 @@ fn mail_signature_save(signature: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
-fn latest_confirmed_message_id(
+fn load_feedback_attachments(
     connection: &Connection,
     task_id: &str,
     company_id: &str,
-) -> Result<Option<String>, String> {
-    connection
-        .query_row(
-            "SELECT m.message_id FROM matches m JOIN messages msg ON msg.id=m.message_id WHERE m.task_id=?1 AND m.company_id=?2 AND m.status='confirmed' ORDER BY datetime(msg.received_at) DESC,msg.received_at DESC,msg.id DESC LIMIT 1",
-            rusqlite::params![task_id, company_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())
+    message_id: &str,
+    status: &str,
+) -> Result<Vec<TaskMatchAttachment>, String> {
+    if status == "confirmed" && !company_id.is_empty() {
+        return Ok(material_versions::load(connection, task_id, company_id)?
+            .into_iter()
+            .filter(|version| version.message_id == message_id)
+            .map(|version| TaskMatchAttachment {
+                id: version.attachment_id,
+                name: version.name,
+                can_open: !version.saved_path.is_empty()
+                    && Path::new(&version.saved_path).is_file(),
+                saved_path: version.saved_path,
+                parse_status: version.parse_status,
+                is_current: version.is_current,
+                received_at: version.received_at,
+                history_path: version.history_path,
+            })
+            .collect());
+    }
+    connection.prepare("SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name")
+        .map_err(|error| error.to_string())?
+        .query_map(rusqlite::params![message_id], |row| {
+            let saved_path: String = row.get(2)?;
+            Ok(TaskMatchAttachment { id: row.get(0)?, name: row.get(1)?, can_open: !saved_path.is_empty() && Path::new(&saved_path).is_file(), saved_path, parse_status: row.get(3)?, is_current: false, received_at: String::new(), history_path: String::new() })
+        }).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
 }
 
 fn load_task_match_detail(
@@ -670,32 +719,8 @@ fn load_task_match_detail(
     for (id, sender, subject, received_at, status, reason, company_name, message_id, company_id) in
         raw
     {
-        let is_current_feedback = status != "confirmed"
-            || company_id.is_empty()
-            || latest_confirmed_message_id(connection, task_id, &company_id)?.as_deref()
-                == Some(message_id.as_str());
-        let attachments = if is_current_feedback {
-            connection
-                .prepare(
-                    "SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name",
-                )
-                .map_err(|error| error.to_string())?
-                .query_map(rusqlite::params![message_id], |row| {
-                    let saved_path: String = row.get(2)?;
-                    Ok(TaskMatchAttachment {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(),
-                        saved_path,
-                        parse_status: row.get(3)?,
-                    })
-                })
-                .map_err(|error| error.to_string())?
-                .collect::<Result<Vec<TaskMatchAttachment>, _>>()
-                .map_err(|error| error.to_string())?
-        } else {
-            Vec::new()
-        };
+        let attachments =
+            load_feedback_attachments(connection, task_id, &company_id, &message_id, &status)?;
         messages.push(TaskMatchMessage {
             id,
             message_id,
@@ -705,6 +730,7 @@ fn load_task_match_detail(
             status,
             reason,
             company_name,
+            company_id,
             attachments,
         });
     }
@@ -842,20 +868,8 @@ fn load_task_feedback_page(
     for (id, sender, subject, received_at, status, reason, company_name, message_id, company_id) in
         raw
     {
-        let is_current_feedback = status != "confirmed"
-            || company_id.is_empty()
-            || latest_confirmed_message_id(connection, task_id, &company_id)?.as_deref()
-                == Some(message_id.as_str());
-        let attachments = if is_current_feedback {
-            connection.prepare("SELECT id,original_name,COALESCE(saved_path,''),parse_status FROM attachments WHERE message_id=?1 ORDER BY original_name")
-                .map_err(|error| error.to_string())?
-                .query_map(rusqlite::params![message_id], |row| {
-                    let saved_path: String = row.get(2)?;
-                    Ok(TaskMatchAttachment { id: row.get(0)?, name: row.get(1)?, can_open: !saved_path.is_empty() && std::path::Path::new(&saved_path).exists(), saved_path, parse_status: row.get(3)? })
-                }).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
-        } else {
-            Vec::new()
-        };
+        let attachments =
+            load_feedback_attachments(connection, task_id, &company_id, &message_id, &status)?;
         messages.push(TaskMatchMessage {
             id,
             message_id,
@@ -865,6 +879,7 @@ fn load_task_feedback_page(
             status,
             reason,
             company_name,
+            company_id,
             attachments,
         });
     }
@@ -899,6 +914,7 @@ fn task_feedback_page(
     state: State<'_, AppState>,
 ) -> Result<TaskFeedbackPage, String> {
     let connection = state.database.lock().map_err(|error| error.to_string())?;
+    material_versions::refresh_task(&connection, task_id.trim())?;
     load_task_feedback_page(
         &connection,
         task_id.trim(),
@@ -914,6 +930,7 @@ fn task_match_detail(
     state: State<'_, AppState>,
 ) -> Result<TaskMatchDetail, String> {
     let connection = state.database.lock().map_err(|error| error.to_string())?;
+    material_versions::refresh_task(&connection, task_id.trim())?;
     load_task_match_detail(&connection, task_id.trim())
 }
 
@@ -991,26 +1008,21 @@ fn load_send_targets(
         }
         let mut attachments = Vec::new();
         if input.include_attachments {
-            if let Some(message_id) =
-                latest_confirmed_message_id(connection, &input.task_id, company_id)?
+            for version in material_versions::load(connection, &input.task_id, company_id)?
+                .into_iter()
+                .filter(|version| version.is_current)
             {
-                let mut statement = connection
-                    .prepare(
-                        "SELECT DISTINCT original_name,saved_path FROM attachments WHERE message_id=?1 AND saved_path IS NOT NULL AND saved_path != ''",
-                    )
-                    .map_err(|error| error.to_string())?;
-                for row in statement
-                    .query_map(rusqlite::params![message_id], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(|error| error.to_string())?
-                {
-                    let (name, saved_path) = row.map_err(|error| error.to_string())?;
-                    let path = PathBuf::from(saved_path);
-                    if path.is_file() {
-                        attachments.push(SendAttachment { name, path });
-                    }
+                let path = PathBuf::from(version.saved_path);
+                if !path.is_file() {
+                    return Err(format!(
+                        "{} 的当前材料 {} 不存在，请重新归档后发送",
+                        company_name, version.name
+                    ));
                 }
+                attachments.push(SendAttachment {
+                    name: version.name,
+                    path,
+                });
             }
         }
         targets.push(SendTarget {
@@ -1282,6 +1294,9 @@ fn start_send(
         return Err("发件账号尚未保存密码，请在邮箱配置中保存该账号密码".to_string());
     }
     let connection = state.database.lock().map_err(|error| error.to_string())?;
+    if input.include_attachments && input.batch_id.trim().is_empty() {
+        material_versions::refresh_task(&connection, &input.task_id)?;
+    }
     let mut targets = load_send_targets(&connection, &input)?;
     drop(connection);
     if test_only {
@@ -2196,6 +2211,12 @@ fn run_sync_job(
         Ok(result) => result?,
         Err(_) => return Err("收件线程异常中断".to_string()),
     }
+    if !task_id.trim().is_empty() {
+        let connection = database.lock().map_err(|error| error.to_string())?;
+        if let Err(error) = material_versions::refresh_task(&connection, &task_id) {
+            errors.push(error);
+        }
+    }
     update_sync_progress(&syncs, &run_id, |progress| {
         progress.status = "completed".into();
         progress.total = progress.processed;
@@ -2388,7 +2409,11 @@ fn keyword_match(value: &str, keywords: &[String]) -> (bool, bool, bool) {
                 excluded = true;
             }
         } else {
-            let term = keyword.strip_prefix('+').unwrap_or(keyword).trim().to_lowercase();
+            let term = keyword
+                .strip_prefix('+')
+                .unwrap_or(keyword)
+                .trim()
+                .to_lowercase();
             if !term.is_empty() {
                 positive_configured = true;
                 if normalized.contains(&term) {
@@ -3041,13 +3066,28 @@ fn match_resolve(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut connection = state.database.lock().map_err(|error| error.to_string())?;
+    let original_task: Option<String> = connection
+        .query_row(
+            "SELECT task_id FROM matches WHERE id=?1",
+            rusqlite::params![match_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
     resolve_match(
         &mut connection,
         match_id.trim(),
         decision.trim(),
         task_id.as_deref(),
         company_id.as_deref(),
-    )
+    )?;
+    for id in original_task
+        .iter()
+        .chain(task_id.iter())
+        .collect::<std::collections::HashSet<_>>()
+    {
+        material_versions::refresh_task(&connection, id)?;
+    }
+    Ok(())
 }
 
 fn validate_archived_path(connection: &Connection, path: &str) -> Result<PathBuf, String> {
@@ -3057,7 +3097,7 @@ fn validate_archived_path(connection: &Connection, path: &str) -> Result<PathBuf
     }
     let exists: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM attachments WHERE saved_path=?1)",
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE saved_path=?1 UNION ALL SELECT 1 FROM material_copies WHERE history_path=?1 OR current_path=?1)",
             rusqlite::params![path],
             |row| row.get(0),
         )
@@ -3151,8 +3191,34 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn report_export(_task_id: String, _status: String) -> Result<String, String> {
-    Ok("待反馈清单导出接口已就绪".to_string())
+fn report_export(
+    task_id: String,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<material_versions::MaterialVersion>, String> {
+    let _ = status;
+    let connection = state.database.lock().map_err(|error| error.to_string())?;
+    let ids = connection
+        .prepare(
+            "SELECT id FROM tasks WHERE deleted_at IS NULL AND (?1='' OR id=?1) ORDER BY name,id",
+        )
+        .map_err(|error| error.to_string())?
+        .query_map(rusqlite::params![task_id.trim()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut materials = Vec::new();
+    for id in ids {
+        material_versions::refresh_task(&connection, &id)?;
+        materials.extend(
+            material_versions::load(&connection, &id, "")?
+                .into_iter()
+                .filter(|version| version.is_current),
+        );
+    }
+    Ok(materials)
 }
 
 #[tauri::command]
@@ -3691,7 +3757,7 @@ mod tests {
     }
 
     #[test]
-    fn send_targets_use_only_latest_confirmed_feedback_attachments() {
+    fn send_targets_keep_supplemental_attachments_from_previous_feedback() {
         let connection = Connection::open_in_memory().expect("database");
         crate::db::initialize(&connection).expect("schema");
         connection.execute("INSERT INTO companies (id,name,aliases,created_at) VALUES ('c1','重庆','[]','now')", []).expect("company");
@@ -3721,7 +3787,7 @@ mod tests {
 
         let targets = load_send_targets(&connection, &input).expect("send targets");
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].attachments.len(), 1);
+        assert_eq!(targets[0].attachments.len(), 2);
         assert_eq!(targets[0].attachments[0].name, "new.docx");
 
         let feedback =
@@ -3730,7 +3796,29 @@ mod tests {
         assert_eq!(feedback.messages[0].message_id, "new");
         assert_eq!(feedback.messages[0].attachments.len(), 1);
         assert_eq!(feedback.messages[1].message_id, "old");
-        assert!(feedback.messages[1].attachments.is_empty());
+        assert_eq!(feedback.messages[1].attachments.len(), 1);
+        assert!(feedback.messages[1].attachments[0].is_current);
+    }
+
+    #[test]
+    fn send_scan_of_task_root_includes_only_current_materials() {
+        let root =
+            std::env::temp_dir().join(format!("unigather-current-scan-{}", next_unique_id("test")));
+        std::fs::create_dir_all(root.join("当前材料/陕西")).unwrap();
+        std::fs::create_dir_all(root.join("历史版本/陕西/昨天")).unwrap();
+        std::fs::write(
+            root.join(".unigather-material-view"),
+            b"current-materials-v1",
+        )
+        .unwrap();
+        std::fs::write(root.join("当前材料/陕西/陕西-目录.xlsx"), b"new").unwrap();
+        std::fs::write(root.join("历史版本/陕西/昨天/目录.xlsx"), b"old").unwrap();
+        std::fs::write(root.join("旧归档.xlsx"), b"legacy").unwrap();
+        let mut items = Vec::new();
+        super::scan_send_directory(&root, &root, false, &mut items).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "陕西-目录.xlsx");
+        assert!(items[0].relative_path.starts_with("当前材料/"));
     }
 
     #[test]
