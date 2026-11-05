@@ -323,9 +323,20 @@ pub fn build_mime_message(
     let html = build_html_body(&body_value, signature);
     text.push_str(&format!("--{boundary}\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n", wrap_base64(html.as_bytes())));
     for attachment in attachments {
-        let bytes = std::fs::read(&attachment.path)
-            .map_err(|error| format!("读取附件失败：{}；{error}", attachment.path.display()))?;
-        let filename = percent_encode(&attachment.name);
+        let (bytes, display_name) = if attachment.path.is_dir() {
+            let zip_bytes = compress_directory_to_zip(&attachment.path)?;
+            let name = if attachment.name.to_lowercase().ends_with(".zip") {
+                attachment.name.clone()
+            } else {
+                format!("{}.zip", attachment.name)
+            };
+            (zip_bytes, name)
+        } else {
+            let bytes = std::fs::read(&attachment.path)
+                .map_err(|error| format!("读取附件失败：{}；{error}", attachment.path.display()))?;
+            (bytes, attachment.name.clone())
+        };
+        let filename = percent_encode(&display_name);
         text.push_str(&format!("--{boundary}\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename*=UTF-8''{filename}\r\n\r\n{}\r\n", wrap_base64(&bytes)));
     }
     text.push_str(&format!("--{boundary}--\r\n"));
@@ -398,7 +409,8 @@ fn dot_stuff(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mime_message, dot_stuff, encode_header, percent_encode, wrap_base64, SendAttachment,
+        build_mime_message, compress_directory_to_zip, dot_stuff, encode_header, percent_encode,
+        wrap_base64, SendAttachment,
     };
 
     #[test]
@@ -442,4 +454,107 @@ mod tests {
         assert!(text.contains("YXR0YWNobWVudA=="));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn builds_mime_message_with_directory_automatically_compressed_to_zip() {
+        let dir = std::env::temp_dir().join(format!(
+            "unigather-zip-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).expect("create dir");
+        std::fs::write(dir.join("file1.txt"), b"hello file 1").expect("file 1");
+        std::fs::write(
+            dir.join(std::path::Path::new("sub").join("file2.txt")),
+            b"hello file 2 in sub",
+        )
+        .expect("file 2");
+
+        let zip_bytes = compress_directory_to_zip(&dir).expect("compress dir");
+        assert!(!zip_bytes.is_empty());
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("open zip");
+        assert!(archive.len() >= 2);
+
+        let message = build_mime_message(
+            "sender@example.com",
+            "发信人",
+            &["to@example.com".into()],
+            &[],
+            "主题",
+            "正文",
+            "",
+            "北京分公司",
+            &[SendAttachment {
+                name: "北京分公司".into(),
+                path: dir.clone(),
+            }],
+        )
+        .expect("build mime");
+        let mime_str = String::from_utf8_lossy(&message);
+        assert!(
+            mime_str.contains("filename*=UTF-8''%E5%8C%97%E4%BA%AC%E5%88%86%E5%85%AC%E5%8F%B8.zip")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+pub fn compress_directory_to_zip(dir_path: &std::path::Path) -> Result<Vec<u8>, String> {
+    if !dir_path.is_dir() {
+        return Err(format!("不是有效目录：{}", dir_path.display()));
+    }
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip_writer = zip::ZipWriter::new(&mut buffer);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        fn add_dir_contents<W: std::io::Write + std::io::Seek>(
+            zip_writer: &mut zip::ZipWriter<W>,
+            options: zip::write::SimpleFileOptions,
+            root: &std::path::Path,
+            current: &std::path::Path,
+        ) -> Result<(), String> {
+            let mut entries = std::fs::read_dir(current)
+                .map_err(|e| format!("读取目录失败: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("读取目录项失败: {e}"))?;
+            entries.sort_by_key(|e| e.file_name());
+
+            for entry in entries {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                if path.is_dir() {
+                    let dir_name = if relative.ends_with('/') {
+                        relative.clone()
+                    } else {
+                        format!("{relative}/")
+                    };
+                    zip_writer
+                        .add_directory(&dir_name, options)
+                        .map_err(|e| format!("写入zip目录项失败: {e}"))?;
+                    add_dir_contents(zip_writer, options, root, &path)?;
+                } else if path.is_file() {
+                    zip_writer
+                        .start_file(&relative, options)
+                        .map_err(|e| format!("写入zip文件头失败: {e}"))?;
+                    let mut file =
+                        std::fs::File::open(&path).map_err(|e| format!("打开文件失败: {e}"))?;
+                    std::io::copy(&mut file, zip_writer)
+                        .map_err(|e| format!("写入zip文件内容失败: {e}"))?;
+                }
+            }
+            Ok(())
+        }
+
+        add_dir_contents(&mut zip_writer, options, dir_path, dir_path)?;
+        zip_writer
+            .finish()
+            .map_err(|e| format!("完成zip压缩失败: {e}"))?;
+    }
+    Ok(buffer.into_inner())
 }

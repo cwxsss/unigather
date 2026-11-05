@@ -1,6 +1,6 @@
 [package]
 name = "unigather"
-version = "0.1.0"
+version = "0.1.1"
 description = "UniGather local material collection desktop application"
 authors = ["UniGather"]
 edition = "2021"
@@ -27,6 +27,7 @@ native-tls = "0.2"
 sha2 = "0.10"
 base64 = "0.22"
 docx-rs = "0.4"
+zip = { version = "9.3.0", default-features = false, features = ["deflate"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

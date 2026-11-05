@@ -29,11 +29,12 @@ const MATERIAL_PATH_STORAGE_KEY = 'unigather.material-path.v1';
 const AI_CONFIG_STORAGE_KEY = 'unigather.ai-config.v1';
 const TASK_SYNC_STORAGE_KEY = 'unigather.task-sync-times.v1';
 const TASK_LAST_RECEIVE_STORAGE_KEY = 'unigather.task-last-receive.v1';
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
 let deletedTasks = [];
 let companyRows = [];
+let selectedCompanyContactIds = new Set();
 let companyOptions = [];
 let selectedCompanyIds = [];
 const COMPANY_GROUPS_KEY = 'unigather.company-groups.v1';
@@ -1035,6 +1036,21 @@ async function persistSendBatch() {
   return summary;
 }
 
+function formatMatchMethod(method = '') {
+  const map = {
+    name_exact: '名称精准',
+    alias_exact: '别名精准',
+    folder_name_exact: '文件夹精准',
+    folder_alias_exact: '文件夹别名',
+    folder_exact: '文件夹精准',
+    folder_fuzzy: '文件夹模糊',
+    fuzzy: '模糊匹配',
+    manual: '人工指定',
+    ambiguous: '多个候选'
+  };
+  return map[method] ?? method;
+}
+
 function renderSendMatchList() {
   const list = document.querySelector('#send-match-list'); if (!list) return;
   const filter = document.querySelector('#send-match-filter')?.value ?? 'all';
@@ -1045,7 +1061,7 @@ function renderSendMatchList() {
   const options = getSendCompanyOptions();
   items.forEach((item) => {
     const row = document.createElement('div'); row.className = `send-match-row status-${item.status}`;
-    const info = document.createElement('div'); info.className = 'send-match-file'; info.innerHTML = `<strong>${escapeHtml(item.fileName)}</strong><small>${escapeHtml(item.matchMethod || '未匹配')} · ${Math.round((item.confidence || 0) * 100)}%</small>`;
+    const info = document.createElement('div'); info.className = 'send-match-file'; info.innerHTML = `<strong>${escapeHtml(item.fileName)}</strong><small>${escapeHtml(formatMatchMethod(item.matchMethod) || '未匹配')} · ${Math.round((item.confidence || 0) * 100)}%</small>`;
     const select = document.createElement('select'); select.className = 'form-select'; select.innerHTML = '<option value="">选择单位</option>' + options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === item.companyId ? 'selected' : ''}>${escapeHtml(option.name)}</option>`).join('');
     select.addEventListener('change', async () => { const option = options.find((candidate) => candidate.id === select.value); item.companyId = option?.id ?? ''; item.companyName = option?.name ?? ''; item.recipients = option?.emails ?? []; item.status = option?.emails?.length ? 'matched' : 'needs_review'; item.matchMethod = 'manual'; item.confidence = 1; item.error = option?.emails?.length ? '' : '单位没有有效邮箱'; renderSendWorkbench(); if (sendBatch.id) { try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId, decision: item.status }); } catch {} } });
     const meta = sendItemStatusMeta(item.status, item.error);
@@ -1083,7 +1099,7 @@ async function initSendModule() {
   const dir = document.querySelector('#send-source-dir');
   try { const signature = await invokeCommand('mail_signature_get', {}, () => '中国联通总部数据安全工作组'); document.querySelector('#send-signature').value = signature || '中国联通总部数据安全工作组'; } catch { document.querySelector('#send-signature').value = '中国联通总部数据安全工作组'; }
   document.querySelector('#send-select-source')?.addEventListener('click', async () => { try { const { open } = await import('@tauri-apps/plugin-dialog'); const selected = await open({ directory: true, multiple: false }); if (typeof selected === 'string') dir.value = selected; } catch { const selected = window.prompt('请输入材料目录路径'); if (selected) dir.value = selected; } });
-  document.querySelector('#send-scan')?.addEventListener('click', async () => { const sourceDir = dir?.value.trim(); if (!sourceDir) { notify('请先选择材料目录', 'error'); return; } const button = document.querySelector('#send-scan'); button.disabled = true; button.textContent = '扫描中…'; try { const recursive = document.querySelector('#send-recursive')?.checked ?? true; const files = await invokeCommand('send_batch_scan', { sourceDir, recursive }); sendBatch = { ...sendBatch, sourceDir, recursive, files, items: buildSendBatchItems(files, getSendCompanyOptions()), id: '' }; document.querySelector('#send-scan-count').textContent = `发现 ${files.length} 个文件`; renderSendWorkbench(); await persistSendBatch(); notify(`扫描完成：发现 ${files.length} 个可发送文件`, 'success'); } catch (error) { notify(`扫描失败：${error.message ?? error}`, 'error'); } finally { button.disabled = false; button.textContent = '开始扫描'; } });
+  document.querySelector('#send-scan')?.addEventListener('click', async () => { const sourceDir = dir?.value.trim(); if (!sourceDir) { notify('请先选择材料目录', 'error'); return; } const button = document.querySelector('#send-scan'); button.disabled = true; button.textContent = '扫描中…'; try { const recursive = document.querySelector('#send-recursive')?.checked ?? true; const zipFolders = document.querySelector('#send-zip-folders')?.checked ?? true; const files = await invokeCommand('send_batch_scan', { sourceDir, recursive, zipFolders }); sendBatch = { ...sendBatch, sourceDir, recursive, files, items: buildSendBatchItems(files, getSendCompanyOptions()), id: '' }; document.querySelector('#send-scan-count').textContent = `发现 ${files.length} 个文件`; renderSendWorkbench(); await persistSendBatch(); notify(`扫描完成：发现 ${files.length} 个可发送文件`, 'success'); } catch (error) { notify(`扫描失败：${error.message ?? error}`, 'error'); } finally { button.disabled = false; button.textContent = '开始扫描'; } });
   ['send-subject','send-body','send-signature','send-cc','send-test-recipient','send-batch-name'].forEach((id) => document.querySelector(`#${id}`)?.addEventListener('input', () => { sendTestConfirmed = false; renderSendWorkbench(); }));
   document.querySelector('#save-default-signature')?.addEventListener('click', async () => { try { await invokeCommand('mail_signature_save', { signature: document.querySelector('#send-signature')?.value ?? '' }); notify('默认邮件签名已保存。', 'success'); } catch (error) { notify(`保存签名失败：${error.message ?? error}`, 'error'); } });
   document.querySelector('#send-match-filter')?.addEventListener('change', renderSendMatchList);
@@ -1249,6 +1265,7 @@ function renderCompanyRows() {
   if (!panel) return;
   panel.replaceChildren();
   if (!companyRows.length) {
+    selectedCompanyContactIds.clear();
     panel.className = 'panel placeholder-panel company-table-panel';
     panel.innerHTML = '<span>▦</span><h3>暂无单位清单</h3><p>导入 Excel 或 CSV 后，可在任务中选择单位并匹配反馈邮箱。</p>';
     return;
@@ -1256,16 +1273,59 @@ function renderCompanyRows() {
   panel.className = 'panel company-table-panel';
   const heading = document.createElement('div');
   heading.className = 'company-table-heading';
-  heading.innerHTML = '<div><p class="eyebrow">已导入清单</p><h3></h3></div><span class="company-table-tip">修改单行后点击保存</span>';
+  heading.innerHTML = `
+    <div><p class="eyebrow">已导入清单</p><h3></h3></div>
+    <div class="company-table-tools" style="display: flex; align-items: center; gap: 12px;">
+      <button type="button" class="ghost-button table-delete" id="company-batch-delete-btn" style="display: none; color: #f58a8a; padding: 5px 12px; font-size: 12px;">批量删除 (0 项)</button>
+      <span class="company-table-tip">修改单行后点击保存</span>
+    </div>
+  `;
   heading.querySelector('h3').textContent = `${new Set(companyRows.map((row) => row.companyId || row.name)).size} 家单位 / ${companyRows.length} 位联系人`;
   panel.append(heading);
+
   const table = document.createElement('table');
   table.className = 'company-table';
-  table.innerHTML = '<thead><tr><th>单位名称</th><th>姓名</th><th>邮箱</th><th>电话</th><th>单位别名</th><th>操作</th></tr></thead>';
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th style="width: 40px; text-align: center;"><input type="checkbox" id="company-select-all" title="全选 / 取消全选" style="accent-color: var(--cyan); cursor: pointer;" /></th>
+        <th>单位名称</th>
+        <th>姓名</th>
+        <th>邮箱</th>
+        <th>电话</th>
+        <th>单位别名</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+  `;
   const body = document.createElement('tbody');
   companyRows.forEach((row, index) => {
     const tr = document.createElement('tr');
     tr.dataset.index = String(index);
+
+    const selectTd = document.createElement('td');
+    selectTd.style.textAlign = 'center';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'company-row-select';
+    checkbox.style.accentColor = 'var(--cyan)';
+    checkbox.style.cursor = 'pointer';
+    if (row.draft || !row.contactId) {
+      checkbox.disabled = true;
+    } else {
+      checkbox.checked = selectedCompanyContactIds.has(row.contactId);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          selectedCompanyContactIds.add(row.contactId);
+        } else {
+          selectedCompanyContactIds.delete(row.contactId);
+        }
+        updateCompanySelectionUI();
+      });
+    }
+    selectTd.append(checkbox);
+    tr.append(selectTd);
+
     const name = document.createElement('input'); name.className = 'table-input'; name.value = row.name ?? ''; name.dataset.field = 'name';
     const contact = document.createElement('input'); contact.className = 'table-input'; contact.value = row.contactName ?? ''; contact.dataset.field = 'contactName'; contact.placeholder = '未填写';
     const emails = document.createElement('input'); emails.className = 'table-input'; emails.value = (row.emails ?? []).join('; '); emails.dataset.field = 'emails';
@@ -1278,6 +1338,68 @@ function renderCompanyRows() {
     body.append(tr);
   });
   table.append(body); panel.append(table);
+
+  const selectAll = table.querySelector('#company-select-all');
+  const batchDeleteBtn = heading.querySelector('#company-batch-delete-btn');
+
+  function updateCompanySelectionUI() {
+    const selectableRows = companyRows.filter((r) => !r.draft && r.contactId);
+    const selectedCount = selectableRows.filter((r) => selectedCompanyContactIds.has(r.contactId)).length;
+    if (selectAll) {
+      selectAll.checked = selectableRows.length > 0 && selectedCount === selectableRows.length;
+      selectAll.indeterminate = selectedCount > 0 && selectedCount < selectableRows.length;
+    }
+    if (batchDeleteBtn) {
+      if (selectedCount > 0) {
+        batchDeleteBtn.style.display = 'inline-flex';
+        batchDeleteBtn.textContent = `批量删除 (已选 ${selectedCount} 项)`;
+      } else {
+        batchDeleteBtn.style.display = 'none';
+      }
+    }
+  }
+
+  selectAll?.addEventListener('change', () => {
+    const selectableRows = companyRows.filter((r) => !r.draft && r.contactId);
+    if (selectAll.checked) {
+      selectableRows.forEach((r) => selectedCompanyContactIds.add(r.contactId));
+    } else {
+      selectedCompanyContactIds.clear();
+    }
+    table.querySelectorAll('.company-row-select:not(:disabled)').forEach((cb) => {
+      cb.checked = selectAll.checked;
+    });
+    updateCompanySelectionUI();
+  });
+
+  batchDeleteBtn?.addEventListener('click', deleteSelectedCompanyRows);
+  updateCompanySelectionUI();
+}
+
+async function deleteSelectedCompanyRows() {
+  const contactIds = [...selectedCompanyContactIds];
+  if (!contactIds.length) {
+    notify('请先勾选需要删除的联系人。', 'error');
+    return;
+  }
+  const count = contactIds.length;
+  if (!window.confirm(`确定要批量删除已选中的 ${count} 位联系人吗？若包含单位的最后一位联系人，对应单位也将一并删除。`)) return;
+  try {
+    const result = await invokeCommand(
+      'company_contact_delete_batch',
+      { contactIds },
+      () => {
+        companyRows = companyRows.filter((r) => !contactIds.includes(r.contactId));
+        return { deletedContacts: count, deletedCompanies: 0, affectedTasks: 0 };
+      }
+    );
+    selectedCompanyContactIds.clear();
+    await loadCompanyRows();
+    const msg = result ? `已成功删除 ${result.deletedContacts} 位联系人（包含 ${result.deletedCompanies} 家单位），影响 ${result.affectedTasks} 个任务。` : `已成功删除 ${count} 位联系人。`;
+    notify(msg);
+  } catch (error) {
+    notify(`批量删除失败：${error.message ?? error}`, 'error');
+  }
 }
 
 async function saveCompanyRow(index, rowElement) {
@@ -1307,6 +1429,7 @@ async function deleteCompanyRow(index) {
   if (!window.confirm(warning)) return;
   try {
     const result = await invokeCommand('company_contact_delete', { contactId: row.contactId });
+    if (row.contactId) selectedCompanyContactIds.delete(row.contactId);
     await loadCompanyRows();
     notify(result?.deletedCompany ? `已删除单位“${row.name}”，并影响 ${result.affectedTasks ?? 0} 个任务。` : '联系人已删除。');
   } catch (error) { notify(`删除失败：${error.message ?? error}`, 'error'); }
@@ -1315,6 +1438,30 @@ async function deleteCompanyRow(index) {
 function initCompanyImport() {
   const fileInput = document.querySelector('#company-file');
   void loadCompanyRows().catch((error) => notify(`读取通讯录失败：${error.message ?? error}`, 'error'));
+  document.querySelector('#clear-all-companies')?.addEventListener('click', async () => {
+    if (!companyRows.length) {
+      notify('当前通讯录为空，无需清空。');
+      return;
+    }
+    const totalUnits = new Set(companyRows.map((row) => row.companyId || row.name)).size;
+    const totalContacts = companyRows.length;
+    if (!window.confirm(`【警告】确定要一键清空通讯录吗？\n将删除全部 ${totalUnits} 家单位和 ${totalContacts} 位联系人。\n此操作不可逆！`)) return;
+    try {
+      const result = await invokeCommand(
+        'company_contact_clear_all',
+        {},
+        () => {
+          companyRows = [];
+          return { deletedContacts: totalContacts, deletedCompanies: totalUnits, affectedTasks: 0 };
+        }
+      );
+      selectedCompanyContactIds.clear();
+      await loadCompanyRows();
+      notify(`通讯录已清空（已删除 ${result?.deletedContacts ?? totalContacts} 位联系人、${result?.deletedCompanies ?? totalUnits} 家单位）。`);
+    } catch (error) {
+      notify(`清空通讯录失败：${error.message ?? error}`, 'error');
+    }
+  });
   document.querySelector('#add-company-contact')?.addEventListener('click', () => { companyRows.unshift({ draft: true, companyId: '', contactId: '', name: '', contactName: '', emails: [], phone: '', aliases: [] }); renderCompanyRows(); document.querySelector('.company-table tbody tr input')?.focus(); });
   document.querySelector('#import-companies')?.addEventListener('click', () => fileInput?.click());
   document.querySelector('#download-company-template')?.addEventListener('click', () => {

@@ -1,4 +1,4 @@
-const SUPPORTED = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt', 'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff']);
+const SUPPORTED = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt', 'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff', 'zip']);
 
 export function isSupportedSendFile(name = '') {
   const extension = String(name).toLocaleLowerCase().split('.').pop() ?? '';
@@ -38,10 +38,39 @@ function scoreFile(fileName, option) {
   return fuzzy && fuzzy.score >= 0.68 ? { score: 0.68 + Math.min(fuzzy.score - 0.68, 0.15), method: 'fuzzy', label: fuzzy.label } : null;
 }
 
+export function extractFolderNames(file = {}) {
+  const rel = String(file.relativePath ?? file.relative_path ?? '').replace(/\\/g, '/');
+  const parts = rel.split('/').filter(Boolean);
+  const folders = [];
+  if (parts.length > 1) {
+    folders.push(...parts.slice(0, -1));
+  }
+  const full = String(file.filePath ?? file.path ?? '').replace(/\\/g, '/');
+  const fullParts = full.split('/').filter(Boolean);
+  if (fullParts.length > 1) {
+    const parent = fullParts[fullParts.length - 2];
+    if (parent && !folders.includes(parent)) {
+      folders.push(parent);
+    }
+  }
+  return folders;
+}
+
 export function matchAttachment(file, options = []) {
+  const folderNames = extractFolderNames(file);
   const candidates = options.map((option) => {
-    const result = scoreFile(file.name, option);
-    return result ? { option, ...result } : null;
+    const fileResult = scoreFile(file.name, option);
+    if (fileResult && fileResult.score >= 0.8) {
+      return { option, ...fileResult };
+    }
+    for (const folder of folderNames) {
+      const folderResult = scoreFile(folder, option);
+      if (folderResult) {
+        const method = folderResult.method.startsWith('folder_') ? folderResult.method : `folder_${folderResult.method}`;
+        return { option, ...folderResult, method, matchedFromFolder: folder };
+      }
+    }
+    return fileResult ? { option, ...fileResult } : null;
   }).filter(Boolean).sort((left, right) => right.score - left.score);
   if (!candidates.length) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], matchMethod: '', confidence: 0, status: 'unmatched', error: '未找到对应单位' };
   const best = candidates[0];

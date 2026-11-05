@@ -112,6 +112,14 @@ pub struct CompanyDeleteResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompanyBatchDeleteResult {
+    pub deleted_contacts: u32,
+    pub deleted_companies: u32,
+    pub affected_tasks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionTestResult {
     pub status: String,
     pub message: String,

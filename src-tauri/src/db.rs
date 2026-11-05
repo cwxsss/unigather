@@ -37,7 +37,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
         );
         CREATE TABLE IF NOT EXISTS matches (
           id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-          task_id TEXT REFERENCES tasks(id), company_id TEXT REFERENCES companies(id),
+          task_id TEXT REFERENCES tasks(id), company_id TEXT REFERENCES companies(id) ON DELETE SET NULL,
           status TEXT NOT NULL, reason TEXT NOT NULL, confidence REAL, reviewed_at TEXT
         );
         CREATE TABLE IF NOT EXISTS material_copies (

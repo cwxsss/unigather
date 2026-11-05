@@ -8,12 +8,13 @@ mod send;
 
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
 use models::{
-    AiConfigInput, AiConfigView, AttachmentCandidate, CompanyContact, CompanyContactInput,
-    CompanyDeleteResult, CompanyImportRow, CompanySummary, ConnectionTestResult, DashboardEvent,
-    DashboardSummary, MailAttachment, MailMessage, MailboxConfig, MailboxTestReport,
-    SendBatchInput, SendBatchItemInput, SendBatchSummary, SendHistoryDetail, SendHistoryItem,
-    SendHistoryRun, SendInput, SyncResult, TaskFeedbackCompany, TaskFeedbackPage, TaskInput,
-    TaskMatchAttachment, TaskMatchDetail, TaskMatchMessage, TaskSummary, TaskSyncRunSummary,
+    AiConfigInput, AiConfigView, AttachmentCandidate, CompanyBatchDeleteResult, CompanyContact,
+    CompanyContactInput, CompanyDeleteResult, CompanyImportRow, CompanySummary,
+    ConnectionTestResult, DashboardEvent, DashboardSummary, MailAttachment, MailMessage,
+    MailboxConfig, MailboxTestReport, SendBatchInput, SendBatchItemInput, SendBatchSummary,
+    SendHistoryDetail, SendHistoryItem, SendHistoryRun, SendInput, SyncResult, TaskFeedbackCompany,
+    TaskFeedbackPage, TaskInput, TaskMatchAttachment, TaskMatchDetail, TaskMatchMessage,
+    TaskSummary, TaskSyncRunSummary,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -220,17 +221,35 @@ fn supported_send_extension(path: &std::path::Path) -> bool {
             | "bmp"
             | "tif"
             | "tiff"
+            | "zip"
     )
+}
+
+fn directory_total_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += directory_total_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
 }
 
 fn scan_send_directory(
     root: &std::path::Path,
     current: &std::path::Path,
     recursive: bool,
+    zip_folders: bool,
     items: &mut Vec<AttachmentCandidate>,
 ) -> Result<(), String> {
     if current.join(".unigather-material-view").is_file() {
-        return scan_send_directory(root, &current.join("当前材料"), true, items);
+        return scan_send_directory(root, &current.join("当前材料"), true, zip_folders, items);
     }
     for entry in std::fs::read_dir(current).map_err(|error| format!("读取材料目录失败：{error}"))?
     {
@@ -239,8 +258,34 @@ fn scan_send_directory(
         let metadata = entry
             .metadata()
             .map_err(|error| format!("读取材料属性失败：{error}"))?;
-        if metadata.is_dir() && recursive {
-            scan_send_directory(root, &path, recursive, items)?;
+        if metadata.is_dir() {
+            let dir_size = directory_total_size(&path);
+            if zip_folders && dir_size > 0 {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let folder_name = path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let zip_name = if folder_name.to_lowercase().ends_with(".zip") {
+                    folder_name
+                } else {
+                    format!("{folder_name}.zip")
+                };
+                items.push(AttachmentCandidate {
+                    id: next_unique_id("dir"),
+                    name: zip_name,
+                    path: path.to_string_lossy().to_string(),
+                    relative_path: relative,
+                    size: dir_size,
+                });
+            } else if recursive {
+                scan_send_directory(root, &path, recursive, zip_folders, items)?;
+            }
         } else if metadata.is_file() && supported_send_extension(&path) {
             let relative = path
                 .strip_prefix(root)
@@ -279,6 +324,7 @@ fn next_unique_id(prefix: &str) -> String {
 fn send_batch_scan(
     source_dir: String,
     recursive: bool,
+    zip_folders: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<Vec<AttachmentCandidate>, String> {
     let root = PathBuf::from(source_dir.trim());
@@ -313,7 +359,13 @@ fn send_batch_scan(
     }
     drop(connection);
     let mut items = Vec::new();
-    scan_send_directory(&root, &root, recursive, &mut items)?;
+    scan_send_directory(
+        &root,
+        &root,
+        recursive,
+        zip_folders.unwrap_or(true),
+        &mut items,
+    )?;
     items.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(items)
 }
@@ -2794,15 +2846,22 @@ fn delete_company_contact(
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    let affected_tasks: u32 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM task_companies WHERE company_id=?1",
-            rusqlite::params![company_id],
-            |row| row.get(0),
-        )
+    let affected_task_ids: Vec<String> = transaction
+        .prepare("SELECT DISTINCT task_id FROM task_companies WHERE company_id=?1")
+        .map_err(|error| error.to_string())?
+        .query_map(rusqlite::params![company_id], |row| row.get(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let affected_tasks = affected_task_ids.len() as u32;
     let deleted_company = contact_count <= 1;
     if deleted_company {
+        transaction
+            .execute(
+                "UPDATE matches SET company_id=NULL, status=CASE WHEN status='confirmed' THEN 'needs_review' ELSE status END WHERE company_id=?1",
+                rusqlite::params![company_id],
+            )
+            .map_err(|error| error.to_string())?;
         transaction
             .execute(
                 "DELETE FROM companies WHERE id=?1",
@@ -2818,10 +2877,214 @@ fn delete_company_contact(
             .map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
+
+    if deleted_company {
+        for task_id in &affected_task_ids {
+            let _ = recompute_task_feedback(connection, task_id);
+            let _ = material_versions::refresh_task(connection, task_id);
+        }
+    }
+
     Ok(CompanyDeleteResult {
         deleted_company,
         affected_tasks,
     })
+}
+
+fn delete_company_contacts_batch(
+    connection: &mut Connection,
+    contact_ids: &[String],
+) -> Result<CompanyBatchDeleteResult, String> {
+    if contact_ids.is_empty() {
+        return Ok(CompanyBatchDeleteResult {
+            deleted_contacts: 0,
+            deleted_companies: 0,
+            affected_tasks: 0,
+        });
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    let all_contacts: Vec<(String, String)> = {
+        let mut stmt = transaction
+            .prepare("SELECT id, company_id FROM company_contacts")
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+
+    let to_delete_set: std::collections::HashSet<&str> =
+        contact_ids.iter().map(|s| s.as_str()).collect();
+
+    let mut company_total: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut company_deleting: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut valid_contact_count = 0u32;
+
+    for (c_id, comp_id) in &all_contacts {
+        *company_total.entry(comp_id.clone()).or_insert(0) += 1;
+        if to_delete_set.contains(c_id.as_str()) {
+            valid_contact_count += 1;
+            *company_deleting.entry(comp_id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    if valid_contact_count == 0 {
+        return Ok(CompanyBatchDeleteResult {
+            deleted_contacts: 0,
+            deleted_companies: 0,
+            affected_tasks: 0,
+        });
+    }
+
+    let mut companies_to_delete: Vec<String> = Vec::new();
+    let mut contacts_only_to_delete: Vec<String> = Vec::new();
+
+    for (comp_id, del_cnt) in company_deleting {
+        let total = company_total.get(&comp_id).copied().unwrap_or(0);
+        if del_cnt >= total {
+            companies_to_delete.push(comp_id);
+        }
+    }
+
+    for (c_id, comp_id) in &all_contacts {
+        if to_delete_set.contains(c_id.as_str()) && !companies_to_delete.contains(comp_id) {
+            contacts_only_to_delete.push(c_id.clone());
+        }
+    }
+
+    let mut affected_tasks_set = std::collections::HashSet::new();
+    for comp_id in &companies_to_delete {
+        {
+            let mut task_stmt = transaction
+                .prepare("SELECT DISTINCT task_id FROM task_companies WHERE company_id=?1")
+                .map_err(|e| e.to_string())?;
+            let rows = task_stmt
+                .query_map(rusqlite::params![comp_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for task_id in rows {
+                if let Ok(tid) = task_id {
+                    affected_tasks_set.insert(tid);
+                }
+            }
+        }
+
+        transaction
+            .execute(
+                "UPDATE matches SET company_id=NULL, status=CASE WHEN status='confirmed' THEN 'needs_review' ELSE status END WHERE company_id=?1",
+                rusqlite::params![comp_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        transaction
+            .execute(
+                "DELETE FROM companies WHERE id=?1",
+                rusqlite::params![comp_id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+
+    for c_id in &contacts_only_to_delete {
+        transaction
+            .execute(
+                "DELETE FROM company_contacts WHERE id=?1",
+                rusqlite::params![c_id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+
+    transaction.commit().map_err(|e| e.to_string())?;
+
+    for task_id in &affected_tasks_set {
+        let _ = recompute_task_feedback(connection, task_id);
+        let _ = material_versions::refresh_task(connection, task_id);
+    }
+
+    Ok(CompanyBatchDeleteResult {
+        deleted_contacts: valid_contact_count,
+        deleted_companies: companies_to_delete.len() as u32,
+        affected_tasks: affected_tasks_set.len() as u32,
+    })
+}
+
+fn clear_all_company_records(
+    connection: &mut Connection,
+) -> Result<CompanyBatchDeleteResult, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    let contact_count: u32 = transaction
+        .query_row("SELECT COUNT(*) FROM company_contacts", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let company_count: u32 = transaction
+        .query_row("SELECT COUNT(*) FROM companies", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    let affected_tasks_set: std::collections::HashSet<String> = {
+        let mut task_stmt = transaction
+            .prepare("SELECT DISTINCT task_id FROM task_companies")
+            .map_err(|e| e.to_string())?;
+        let set = task_stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        set
+    };
+
+    transaction
+        .execute(
+            "UPDATE matches SET company_id=NULL, status=CASE WHEN status='confirmed' THEN 'needs_review' ELSE status END WHERE company_id IS NOT NULL",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+    transaction
+        .execute("DELETE FROM company_contacts", [])
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute("DELETE FROM companies", [])
+        .map_err(|e| e.to_string())?;
+
+    transaction.commit().map_err(|e| e.to_string())?;
+
+    for task_id in &affected_tasks_set {
+        let _ = recompute_task_feedback(connection, task_id);
+        let _ = material_versions::refresh_task(connection, task_id);
+    }
+
+    Ok(CompanyBatchDeleteResult {
+        deleted_contacts: contact_count,
+        deleted_companies: company_count,
+        affected_tasks: affected_tasks_set.len() as u32,
+    })
+}
+
+#[tauri::command]
+fn company_contact_delete_batch(
+    contact_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<CompanyBatchDeleteResult, String> {
+    let mut connection = state.database.lock().map_err(|error| error.to_string())?;
+    delete_company_contacts_batch(&mut connection, &contact_ids)
+}
+
+#[tauri::command]
+fn company_contact_clear_all(
+    state: State<'_, AppState>,
+) -> Result<CompanyBatchDeleteResult, String> {
+    let mut connection = state.database.lock().map_err(|error| error.to_string())?;
+    clear_all_company_records(&mut connection)
 }
 
 #[tauri::command]
@@ -3333,8 +3596,9 @@ fn production_database_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        archive_task_attachment, database_path_for_executable, delete_company_contact,
-        evaluate_task_match, load_dashboard_summary, load_send_history_detail, load_send_targets,
+        archive_task_attachment, clear_all_company_records, database_path_for_executable,
+        delete_company_contact, delete_company_contacts_batch, evaluate_task_match,
+        load_dashboard_summary, load_send_history_detail, load_send_targets,
         load_task_feedback_page, load_task_match_detail, load_task_pending_companies,
         next_unique_id, recompute_task_feedback, replace_send_batch_items, resolve_match,
         restore_task_records, soft_delete_task_records, validate_archived_path,
@@ -3650,6 +3914,101 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_last_contact_with_existing_matches_succeeds_without_fk_error() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        connection.execute("INSERT INTO companies (id,name,aliases,created_at) VALUES ('c','单位','[]',datetime('now'))", []).expect("company");
+        connection.execute("INSERT INTO company_contacts (id,company_id,email,created_at) VALUES ('p','c','a@example.com',datetime('now'))", []).expect("contact");
+        connection.execute("INSERT INTO tasks (id,name,status,deadline,poll_minutes,save_directory,filename_template,created_at) VALUES ('t','任务','active','2026-08-31',30,'.','{原文件名}',datetime('now'))", []).expect("task");
+        connection
+            .execute(
+                "INSERT INTO task_companies (task_id,company_id) VALUES ('t','c')",
+                [],
+            )
+            .expect("membership");
+        connection.execute("INSERT INTO messages (id,mailbox_id,external_id,sender,recipients,cc,subject,body,received_at,content_hash) VALUES ('m','b','ext','a@example.com','[]','[]','主题','正文',datetime('now'),'hash')", []).expect("message");
+        connection.execute("INSERT INTO matches (id,message_id,task_id,company_id,status,reason) VALUES ('match1','m','t','c','confirmed','rule')", []).expect("match");
+
+        let result =
+            delete_company_contact(&mut connection, "p").expect("delete with match should succeed");
+        assert!(result.deleted_company);
+        assert_eq!(result.affected_tasks, 1);
+
+        let match_company_id: Option<String> = connection
+            .query_row(
+                "SELECT company_id FROM matches WHERE id='match1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query match");
+        assert_eq!(match_company_id, None);
+
+        let match_status: String = connection
+            .query_row("SELECT status FROM matches WHERE id='match1'", [], |row| {
+                row.get(0)
+            })
+            .expect("query status");
+        assert_eq!(match_status, "needs_review");
+    }
+
+    #[test]
+    fn batch_delete_and_clear_all_contacts() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        connection.execute("INSERT INTO companies (id,name,aliases,created_at) VALUES ('c1','单位1','[]',datetime('now')), ('c2','单位2','[]',datetime('now'))", []).expect("companies");
+        connection.execute("INSERT INTO company_contacts (id,company_id,email,created_at) VALUES ('p1','c1','a@example.com',datetime('now')), ('p2','c1','b@example.com',datetime('now')), ('p3','c2','c@example.com',datetime('now'))", []).expect("contacts");
+        connection.execute("INSERT INTO tasks (id,name,status,deadline,poll_minutes,save_directory,filename_template,created_at) VALUES ('t','任务','active','2026-08-31',30,'.','{原文件名}',datetime('now'))", []).expect("task");
+        connection
+            .execute(
+                "INSERT INTO task_companies (task_id,company_id) VALUES ('t','c1'),('t','c2')",
+                [],
+            )
+            .expect("membership");
+
+        // Delete 1 of 2 contacts for c1 -> c1 remains
+        let res1 = delete_company_contacts_batch(&mut connection, &["p1".to_string()])
+            .expect("batch delete partial");
+        assert_eq!(res1.deleted_contacts, 1);
+        assert_eq!(res1.deleted_companies, 0);
+
+        let c1_count: u32 = connection
+            .query_row("SELECT COUNT(*) FROM companies WHERE id='c1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(c1_count, 1);
+
+        // Delete last contact of c2 -> c2 is deleted
+        let res2 = delete_company_contacts_batch(&mut connection, &["p3".to_string()])
+            .expect("batch delete full");
+        assert_eq!(res2.deleted_contacts, 1);
+        assert_eq!(res2.deleted_companies, 1);
+
+        let c2_count: u32 = connection
+            .query_row("SELECT COUNT(*) FROM companies WHERE id='c2'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(c2_count, 0);
+
+        // Clear all remaining (p2 / c1)
+        let res3 = clear_all_company_records(&mut connection).expect("clear all");
+        assert_eq!(res3.deleted_contacts, 1);
+        assert_eq!(res3.deleted_companies, 1);
+
+        let total_contacts: u32 = connection
+            .query_row("SELECT COUNT(*) FROM company_contacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let total_companies: u32 = connection
+            .query_row("SELECT COUNT(*) FROM companies", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total_contacts, 0);
+        assert_eq!(total_companies, 0);
+    }
+
+    #[test]
     fn loads_all_send_attempts_and_items_for_a_batch() {
         let connection = Connection::open_in_memory().expect("database");
         crate::db::initialize(&connection).expect("schema");
@@ -3815,10 +4174,31 @@ mod tests {
         std::fs::write(root.join("历史版本/陕西/昨天/目录.xlsx"), b"old").unwrap();
         std::fs::write(root.join("旧归档.xlsx"), b"legacy").unwrap();
         let mut items = Vec::new();
-        super::scan_send_directory(&root, &root, false, &mut items).unwrap();
+        super::scan_send_directory(&root, &root, false, false, &mut items).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "陕西-目录.xlsx");
         assert!(items[0].relative_path.starts_with("当前材料/"));
+    }
+
+    #[test]
+    fn send_scan_recognizes_folder_and_creates_zip_candidate() {
+        let root =
+            std::env::temp_dir().join(format!("unigather-zip-scan-{}", next_unique_id("test")));
+        std::fs::create_dir_all(root.join("北京分公司")).unwrap();
+        std::fs::write(root.join("北京分公司/材料.docx"), b"docx content").unwrap();
+        std::fs::write(root.join("通知.pdf"), b"pdf content").unwrap();
+
+        let mut items = Vec::new();
+        super::scan_send_directory(&root, &root, true, true, &mut items).unwrap();
+        assert_eq!(items.len(), 2);
+        let dir_item = items
+            .iter()
+            .find(|i| i.name == "北京分公司.zip")
+            .expect("found zip candidate");
+        assert_eq!(dir_item.name, "北京分公司.zip");
+        assert!(std::path::Path::new(&dir_item.path).is_dir());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4081,6 +4461,8 @@ pub fn run() {
             company_contact_create,
             company_contact_update,
             company_contact_delete,
+            company_contact_delete_batch,
+            company_contact_clear_all,
             company_list,
             sync_history,
             mail_list,

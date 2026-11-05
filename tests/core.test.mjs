@@ -18,7 +18,7 @@ import { formatCompanyOptionMeta, buildTimePresetRange, validateTimeRange } from
 import { isWithinSyncWindow, matchMessageToCompanyTask, normalizeSyncEnd } from '../src/core/task-sync.js';
 import { getTaskSchedule, formatTaskScheduleTime, formatTaskScheduleCountdown, shouldRunInitialTaskSync } from '../src/core/task-schedule.js';
 import { buildSendPayload, formatSendProgress, normalizeSendTargets, validateSendForm } from '../src/core/send.js';
-import { buildSendBatchItems, composeSendBody, groupSendBatchItems, parseBatchCc, sendItemStatusMeta, validateSendBatch, validateBatchPersistence } from '../src/core/send-workbench.js';
+import { buildSendBatchItems, composeSendBody, extractFolderNames, groupSendBatchItems, isSupportedSendFile, matchAttachment, parseBatchCc, sendItemStatusMeta, validateSendBatch, validateBatchPersistence } from '../src/core/send-workbench.js';
 import { normalizeDashboardSummary } from '../src/core/dashboard.js';
 import { buildPendingFeedbackExportRows, normalizePendingFeedbackCompanies, pendingFeedbackStatusLabel } from '../src/core/pending-feedback.js';
 import { drilldownItems, paginateTaskMatches } from '../src/core/task-feedback.js';
@@ -449,6 +449,36 @@ test('matches independent send batch files by unit name and alias', () => {
   assert.equal(items[2].status, 'unmatched');
 });
 
+test('recognizes zip files and folder names when matching send batch attachments', () => {
+  assert.equal(isSupportedSendFile('北京.zip'), true);
+  assert.deepEqual(extractFolderNames({ path: 'D:/files/北京分公司/材料清单.xlsx', relativePath: '北京分公司/材料清单.xlsx' }), ['北京分公司']);
+
+  const options = [
+    { id: 'bj', name: '北京分公司', aliases: ['北京'], emails: ['beijing@example.com'] },
+    { id: 'sh', name: '上海分公司', aliases: ['上海'], emails: ['shanghai@example.com'] },
+  ];
+
+  const folderMatched = matchAttachment({
+    id: 'f1',
+    name: '材料清单.xlsx',
+    path: 'D:/send_files/北京分公司/材料清单.xlsx',
+    relativePath: '北京分公司/材料清单.xlsx',
+  }, options);
+  assert.equal(folderMatched.status, 'matched');
+  assert.equal(folderMatched.companyId, 'bj');
+  assert.equal(folderMatched.matchMethod, 'folder_name_exact');
+
+  const zipMatched = matchAttachment({
+    id: 'f2',
+    name: '上海分公司.zip',
+    path: 'D:/send_files/上海分公司',
+    relativePath: '上海分公司.zip',
+  }, options);
+  assert.equal(zipMatched.status, 'matched');
+  assert.equal(zipMatched.companyId, 'sh');
+  assert.equal(zipMatched.matchMethod, 'name_exact');
+});
+
 test('groups independent send batch attachments and validates unresolved items', () => {
   const items = [
     { id: '1', fileName: 'a.xlsx', filePath: 'D:/a.xlsx', companyId: 'a', companyName: '北桥', recipients: ['a@example.com'], status: 'matched' },
@@ -518,4 +548,14 @@ test('uses readable and compact task company picker rows', () => {
   assert.match(css, /\.task-picker-redesigned \.task-company-option\{[^}]*flex:0 0 40px/);
   assert.match(css, /\.task-picker-redesigned \.task-company-option strong\{[^}]*font-size:16px/);
   assert.match(css, /\.task-picker-redesigned \.task-company-option small\{[^}]*font-size:14px/);
+});
+
+test('includes batch contact deletion and clear all controls in the address book UI', () => {
+  const html = readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="clear-all-companies"'));
+  assert.ok(main.includes('id="company-select-all"'));
+  assert.ok(main.includes('id="company-batch-delete-btn"'));
+  assert.ok(main.includes('company_contact_delete_batch'));
+  assert.ok(main.includes('company_contact_clear_all'));
 });
