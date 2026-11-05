@@ -479,6 +479,50 @@ test('recognizes zip files and folder names when matching send batch attachments
   assert.equal(zipMatched.matchMethod, 'name_exact');
 });
 
+test('intelligently matches filenames like 支付公司 and 智网科技 to full company names', () => {
+  const options = [
+    { id: 'c1', name: '联通软件研究院', emails: ['rj@example.com'] },
+    { id: 'c2', name: '联通支付有限公司', emails: ['zf@example.com'] },
+    { id: 'c3', name: '联通在线信息科技有限公司', emails: ['zx@example.com'] },
+    { id: 'c4', name: '联通智网科技有限公司', emails: ['zw@example.com'] },
+    { id: 'c5', name: '联通数字科技有限公司', emails: ['sk@example.com'] },
+    { id: 'c6', name: '联通党校（联通人才发展中心）', emails: ['dx@example.com'] },
+    { id: 'c7', name: '中国联通研究院', emails: ['yjy@example.com'] },
+    { id: 'c8', name: '联通数据智能有限公司', emails: ['sz@example.com'] },
+    { id: 'c9', name: '联通集团财务有限公司', emails: ['cw@example.com'] },
+    { id: 'c10', name: '中讯邮电咨询设计院有限公司', emails: ['zxyd@example.com'] },
+    { id: 'c11', name: '中国联通国际有限公司', emails: ['gj@example.com'] },
+    { id: 'c12', name: '联通融资租赁有限公司', emails: ['zl@example.com'] },
+    { id: 'c13', name: '联通华盛通信有限公司', emails: ['hs@example.com'] },
+  ];
+
+  const testCases = [
+    { file: '支付公司.xlsx', expectedCompanyId: 'c2' },
+    { file: '智网科技.docx', expectedCompanyId: 'c4' },
+    { file: '【智网科技】数据清单.xlsx', expectedCompanyId: 'c4' },
+    { file: '在线公司业务报表.xlsx', expectedCompanyId: 'c3' },
+    { file: '数科.xlsx', expectedCompanyId: 'c5' },
+    { file: '2026年联通数科考核表.docx', expectedCompanyId: 'c5' },
+    { file: '软研院.xlsx', expectedCompanyId: 'c1' },
+    { file: '软件研究院.docx', expectedCompanyId: 'c1' },
+    { file: '联通党校第一期培训名册.xlsx', expectedCompanyId: 'c6' },
+    { file: '人才发展中心.xlsx', expectedCompanyId: 'c6' },
+    { file: '研究院.xlsx', expectedCompanyId: 'c7' },
+    { file: '数智公司.xlsx', expectedCompanyId: 'c8' },
+    { file: '财务公司资金月报.pdf', expectedCompanyId: 'c9' },
+    { file: '中讯院网络优化方案.docx', expectedCompanyId: 'c10' },
+    { file: '国际公司.xlsx', expectedCompanyId: 'c11' },
+    { file: '融资租赁.docx', expectedCompanyId: 'c12' },
+    { file: '华盛通信.xlsx', expectedCompanyId: 'c13' },
+  ];
+
+  for (const { file, expectedCompanyId } of testCases) {
+    const matched = matchAttachment({ id: 'test', name: file, path: `D:/files/${file}` }, options);
+    assert.equal(matched.status, 'matched', `File ${file} should be matched`);
+    assert.equal(matched.companyId, expectedCompanyId, `File ${file} should match company ${expectedCompanyId}, got ${matched.companyId}`);
+  }
+});
+
 test('groups independent send batch attachments and validates unresolved items', () => {
   const items = [
     { id: '1', fileName: 'a.xlsx', filePath: 'D:/a.xlsx', companyId: 'a', companyName: '北桥', recipients: ['a@example.com'], status: 'matched' },

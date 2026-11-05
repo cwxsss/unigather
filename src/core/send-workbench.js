@@ -5,12 +5,156 @@ export function isSupportedSendFile(name = '') {
   return SUPPORTED.has(extension);
 }
 
+const COMMON_PREFIXES = [
+  '中国联合网络通信有限公司',
+  '中国联合网络通信',
+  '中国联通集团',
+  '中国联通',
+  '联通集团',
+  '联通',
+];
+
+const COMMON_SUFFIXES = [
+  '有限责任公司',
+  '股份有限公司',
+  '责任有限公司',
+  '咨询设计院有限公司',
+  '信息科技有限公司',
+  '网络技术有限公司',
+  '科技有限公司',
+  '通信有限公司',
+  '有限公司',
+  '分公司',
+  '子公司',
+  '总公司',
+  '公司',
+  '中心',
+  '本部',
+  '学院',
+  '省分',
+  '市分',
+  '省分公司',
+  '市分公司',
+];
+
+const UNICOM_DOMAIN_ALIASES = {
+  '软件研究': ['软研院', '软研', '软件院', '软件研究', '软件研究院', '联通软研'],
+  '数字科技': ['数科', '联通数科', '数字科技', '数科公司'],
+  '智网科技': ['智网', '联通智网', '智网科技', '智网公司'],
+  '在线信息科技': ['在线', '在线科技', '在线信息', '联通在线', '在线公司'],
+  '在线信息': ['在线', '在线科技', '在线信息', '联通在线', '在线公司'],
+  '在线科技': ['在线', '在线科技', '在线信息', '联通在线', '在线公司'],
+  '数据智能': ['数智', '数智公司', '数据智能', '联通数智'],
+  '财务': ['财务公司', '联通财务', '财务'],
+  '支付': ['支付公司', '联通支付', '支付'],
+  '国际': ['国际公司', '联通国际', '国际'],
+  '华盛通信': ['华盛', '华盛通信', '华盛公司', '联通华盛'],
+  '华盛': ['华盛', '华盛通信', '华盛公司', '联通华盛'],
+  '中讯': ['中讯邮电', '中讯设计院', '中讯院', '中讯', '中讯咨询'],
+  '融资租赁': ['融资租赁', '租赁公司', '联通租赁', '租赁'],
+  '党校': ['党校', '联通党校'],
+  '人才发展': ['人才发展', '人才发展中心', '人才中心', '联通人才中心'],
+  '研究院': ['联通研究院', '研究院', '联通院'],
+};
+
 export function normalizeMatchText(value = '') {
   return String(value ?? '')
     .toLocaleLowerCase()
     .replace(/\.[a-z0-9]{1,5}$/i, '')
-    .replace(/[\s_\-—(),，。:：/\\【】\[\]（）]+/g, '')
-    .replace(/(省|市|自治区|分公司|有限公司|中心|本部)$/g, '');
+    .replace(/[\s_\-—(),，。:：/\\【】\[\]（）]+/g, '');
+}
+
+export function extractCompanyLabels(name = '') {
+  const raw = String(name ?? '').trim();
+  if (!raw) return [];
+  const labels = [];
+  const parenRegex = /[（\(]([^）\)]+)[）\)]/g;
+  let match;
+  while ((match = parenRegex.exec(raw)) !== null) {
+    const inside = match[1].trim();
+    if (inside) labels.push(inside);
+  }
+  const outside = raw.replace(/[（\(][^）\)]+[）\)]/g, '').trim();
+  if (outside) labels.push(outside);
+  if (!labels.length) labels.push(raw);
+  return labels;
+}
+
+export function expandCompanyTerms(option = {}) {
+  const name = option.name ?? '';
+  const aliases = Array.isArray(option.aliases) ? option.aliases : [];
+  const baseLabels = [];
+  for (const item of [name, ...aliases]) {
+    baseLabels.push(...extractCompanyLabels(item));
+  }
+
+  const termMap = new Map();
+  const addTerm = (term, method, priority) => {
+    const clean = normalizeMatchText(term);
+    if (!clean || clean.length < 2) return;
+    const existing = termMap.get(clean);
+    if (!existing || existing.priority < priority) {
+      termMap.set(clean, { method, priority });
+    }
+  };
+
+  for (const label of baseLabels) {
+    const clean = normalizeMatchText(label);
+    if (!clean) continue;
+    const isDirectName = normalizeMatchText(name) === clean;
+    addTerm(clean, isDirectName ? 'name_exact' : 'alias_exact', isDirectName ? 100 : 90);
+
+    // Strip suffix
+    let strippedSuffix = clean;
+    for (const suffix of COMMON_SUFFIXES) {
+      if (strippedSuffix.endsWith(suffix) && strippedSuffix.length > suffix.length) {
+        strippedSuffix = strippedSuffix.slice(0, -suffix.length);
+        addTerm(strippedSuffix, isDirectName ? 'name_exact' : 'core_exact', isDirectName ? 95 : 85);
+        break;
+      }
+    }
+
+    // Strip prefix
+    let core = strippedSuffix;
+    for (const prefix of COMMON_PREFIXES) {
+      if (core.startsWith(prefix) && core.length > prefix.length) {
+        core = core.slice(prefix.length);
+        addTerm(core, 'core_exact', 85);
+        break;
+      }
+    }
+
+    // Also strip prefix from clean directly (e.g. 中国联通研究院 -> 研究院)
+    for (const prefix of COMMON_PREFIXES) {
+      if (clean.startsWith(prefix) && clean.length > prefix.length) {
+        const withoutPrefix = clean.slice(prefix.length);
+        addTerm(withoutPrefix, 'core_exact', 86);
+        break;
+      }
+    }
+
+    if (core.length >= 2) {
+      addTerm(core, 'core_exact', 85);
+      if (!core.endsWith('公司')) {
+        addTerm(`${core}公司`, 'core_exact', 86);
+      }
+      if (!core.startsWith('联通')) {
+        addTerm(`联通${core}`, 'core_exact', 87);
+      }
+    }
+
+    // Check domain abbreviations
+    for (const [key, abbrs] of Object.entries(UNICOM_DOMAIN_ALIASES)) {
+      if (key === '研究院' && clean.includes('软件')) continue;
+      if (clean.includes(key)) {
+        for (const abbr of abbrs) {
+          addTerm(abbr, 'abbr_exact', 88);
+        }
+      }
+    }
+  }
+
+  return [...termMap.entries()].map(([term, meta]) => ({ term, ...meta }));
 }
 
 function emails(option) {
@@ -19,23 +163,55 @@ function emails(option) {
     .filter(Boolean))];
 }
 
-function labels(option) {
-  return [option?.name, ...(Array.isArray(option?.aliases) ? option.aliases : [])]
-    .map((value) => String(value ?? '').trim())
-    .filter(Boolean);
-}
+export function scoreFile(fileName, option) {
+  const cleanFile = normalizeMatchText(fileName);
+  if (!cleanFile) return null;
+  const terms = expandCompanyTerms(option);
+  let best = null;
 
-function scoreFile(fileName, option) {
-  const normalizedFile = normalizeMatchText(fileName);
-  const matches = labels(option).map((label) => ({ label, normalized: normalizeMatchText(label) })).filter((item) => item.normalized && normalizedFile.includes(item.normalized));
-  if (matches.length) return { score: 0.98, method: matches[0].label === option.name ? 'name_exact' : 'alias_exact', label: matches[0].label };
-  const fileChars = new Set([...normalizedFile]);
-  const fuzzy = labels(option).map((label) => {
-    const normalized = normalizeMatchText(label);
-    const overlap = [...new Set([...normalized])].filter((char) => fileChars.has(char)).length;
-    return { label, score: normalized.length > 1 ? overlap / new Set([...normalized]).size : 0 };
-  }).sort((left, right) => right.score - left.score)[0];
-  return fuzzy && fuzzy.score >= 0.68 ? { score: 0.68 + Math.min(fuzzy.score - 0.68, 0.15), method: 'fuzzy', label: fuzzy.label } : null;
+  for (const item of terms) {
+    const { term, method, priority } = item;
+    let score = 0;
+    let matchMethod = method;
+    let isFull = false;
+
+    if (cleanFile === term) {
+      score = 0.98 + (priority >= 100 ? 0.01 : 0);
+      isFull = true;
+    } else if (cleanFile.startsWith(term) || cleanFile.endsWith(term)) {
+      score = 0.88 + Math.min((term.length / cleanFile.length) * 0.06, 0.06);
+    } else if (cleanFile.includes(term)) {
+      score = 0.86 + Math.min((term.length / cleanFile.length) * 0.06, 0.06);
+    } else if (term.includes(cleanFile) && cleanFile.length >= 2) {
+      score = 0.84 + Math.min((cleanFile.length / term.length) * 0.06, 0.06);
+      matchMethod = 'core_exact';
+    }
+
+    if (score > 0 && (!best || score > best.score || (Math.abs(score - best.score) < 0.001 && term.length > best.term.length))) {
+      best = { score, method: matchMethod, term, label: option.name, isFull };
+    }
+  }
+
+  if (best && best.score >= 0.8) return best;
+
+  // Fuzzy character overlap fallback
+  const fileChars = new Set([...cleanFile]);
+  let bestFuzzy = null;
+  for (const item of terms) {
+    const { term } = item;
+    if (term.length < 2) continue;
+    const termChars = new Set([...term]);
+    const overlap = [...termChars].filter((c) => fileChars.has(c)).length;
+    const ratio = overlap / termChars.size;
+    if (ratio >= 0.75) {
+      const fuzzyScore = 0.70 + Math.min(ratio - 0.75, 0.10);
+      if (!bestFuzzy || fuzzyScore > bestFuzzy.score) {
+        bestFuzzy = { score: fuzzyScore, method: 'fuzzy', term, label: option.name, isFull: false };
+      }
+    }
+  }
+
+  return bestFuzzy;
 }
 
 export function extractFolderNames(file = {}) {
@@ -74,7 +250,10 @@ export function matchAttachment(file, options = []) {
   }).filter(Boolean).sort((left, right) => right.score - left.score);
   if (!candidates.length) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], matchMethod: '', confidence: 0, status: 'unmatched', error: '未找到对应单位' };
   const best = candidates[0];
-  const tied = candidates.filter((candidate) => Math.abs(candidate.score - best.score) < 0.04);
+  const tied = candidates.filter((candidate) => {
+    if (best.isFull && !candidate.isFull) return false;
+    return Math.abs(candidate.score - best.score) < 0.03;
+  });
   if (tied.length > 1) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], matchMethod: 'ambiguous', confidence: best.score, status: 'needs_review', error: `候选单位：${tied.map((candidate) => candidate.option.name).join('、')}` };
   const option = best.option;
   const recipients = emails(option);

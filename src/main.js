@@ -29,7 +29,7 @@ const MATERIAL_PATH_STORAGE_KEY = 'unigather.material-path.v1';
 const AI_CONFIG_STORAGE_KEY = 'unigather.ai-config.v1';
 const TASK_SYNC_STORAGE_KEY = 'unigather.task-sync-times.v1';
 const TASK_LAST_RECEIVE_STORAGE_KEY = 'unigather.task-last-receive.v1';
-const APP_VERSION = '0.1.1';
+const APP_VERSION = '0.1.2';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
 let deletedTasks = [];
@@ -1040,8 +1040,13 @@ function formatMatchMethod(method = '') {
   const map = {
     name_exact: '名称精准',
     alias_exact: '别名精准',
+    core_exact: '核心词精准',
+    abbr_exact: '简称精准',
+    paren_exact: '括号别名',
     folder_name_exact: '文件夹精准',
     folder_alias_exact: '文件夹别名',
+    folder_core_exact: '文件夹核心词',
+    folder_abbr_exact: '文件夹简称',
     folder_exact: '文件夹精准',
     folder_fuzzy: '文件夹模糊',
     fuzzy: '模糊匹配',
