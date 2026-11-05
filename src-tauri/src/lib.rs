@@ -1065,7 +1065,7 @@ fn load_send_targets(
                 .filter(|version| version.is_current)
             {
                 let path = PathBuf::from(version.saved_path);
-                if !path.is_file() {
+                if !path.is_file() && !path.is_dir() {
                     return Err(format!(
                         "{} 的当前材料 {} 不存在，请重新归档后发送",
                         company_name, version.name
@@ -1124,7 +1124,7 @@ fn load_batch_send_targets(
             }
         }
         let path = PathBuf::from(&file_path);
-        if path.is_file()
+        if (path.is_file() || path.is_dir())
             && !target
                 .attachments
                 .iter()
@@ -4199,6 +4199,64 @@ mod tests {
         assert!(std::path::Path::new(&dir_item.path).is_dir());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_batch_send_targets_includes_folder_and_file_attachments() {
+        let connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        let dir =
+            std::env::temp_dir().join(format!("unigather-target-test-{}", next_unique_id("test")));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file_path = dir.join("file.txt");
+        std::fs::write(&file_path, b"content").unwrap();
+        let folder_path = dir.join("sub");
+
+        connection
+            .execute(
+                "INSERT INTO send_batches (id,name,source_dir,recursive,subject,body,signature,cc,status,created_at,updated_at) VALUES ('b1','批次','.','1','主题','正文','','[]','ready','now','now')",
+                [],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO send_batch_items (id,batch_id,file_name,file_path,company_id,company_name,recipients,match_method,confidence,status,error) VALUES ('i1','b1','sub.zip',?1,'c1','北京分公司','[\"bj@example.com\"]','folder_exact',0.98,'matched','')",
+                rusqlite::params![folder_path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO send_batch_items (id,batch_id,file_name,file_path,company_id,company_name,recipients,match_method,confidence,status,error) VALUES ('i2','b1','file.txt',?1,'c1','北京分公司','[\"bj@example.com\"]','name_exact',0.98,'matched','')",
+                rusqlite::params![file_path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+
+        let input = SendInput {
+            task_id: String::new(),
+            batch_id: "b1".into(),
+            smtp_host: String::new(),
+            smtp_port: 0,
+            encryption: String::new(),
+            username: String::new(),
+            sender_name: String::new(),
+            subject: "主题".into(),
+            body: "正文".into(),
+            signature: String::new(),
+            include_attachments: true,
+            company_ids: vec!["c1".into()],
+            cc: Vec::new(),
+            test_recipient: String::new(),
+        };
+
+        let targets = super::load_batch_send_targets(&connection, &input).expect("targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].attachments.len(), 2);
+        assert!(targets[0].attachments.iter().any(|a| a.name == "sub.zip"));
+        assert!(targets[0].attachments.iter().any(|a| a.name == "file.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

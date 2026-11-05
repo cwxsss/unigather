@@ -336,8 +336,12 @@ pub fn build_mime_message(
                 .map_err(|error| format!("读取附件失败：{}；{error}", attachment.path.display()))?;
             (bytes, attachment.name.clone())
         };
-        let filename = percent_encode(&display_name);
-        text.push_str(&format!("--{boundary}\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename*=UTF-8''{filename}\r\n\r\n{}\r\n", wrap_base64(&bytes)));
+        let encoded_name = encode_header(&display_name);
+        let percent_name = percent_encode(&display_name);
+        text.push_str(&format!(
+            "--{boundary}\r\nContent-Type: application/octet-stream; name=\"{encoded_name}\"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"{encoded_name}\"; filename*=UTF-8''{percent_name}\r\n\r\n{}\r\n",
+            wrap_base64(&bytes)
+        ));
     }
     text.push_str(&format!("--{boundary}--\r\n"));
     Ok(text.into_bytes())
@@ -451,6 +455,8 @@ mod tests {
         assert!(text.contains(&wrap_base64("<div style=\"font-family:'仿宋_GB2312','FangSong';font-size:14pt;line-height:1.8;white-space:pre-wrap\">您好，甲公司，请在今天前反馈。</div><div style=\"font-family:'Microsoft YaHei','微软雅黑';font-size:9pt;line-height:1.6;white-space:pre-wrap;margin-top:18px\">中国联通总部数据安全工作组</div>".as_bytes())));
         assert!(!text.contains("text/plain; charset=UTF-8"));
         assert!(text.contains("filename*=UTF-8''%E9%99%84%E4%BB%B6.txt"));
+        assert!(text.contains(&format!("name=\"{}\"", encode_header("附件.txt"))));
+        assert!(text.contains(&format!("filename=\"{}\"", encode_header("附件.txt"))));
         assert!(text.contains("YXR0YWNobWVudA=="));
         let _ = std::fs::remove_file(path);
     }
