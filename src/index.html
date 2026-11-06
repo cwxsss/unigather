@@ -47,13 +47,190 @@
         <section class="view" id="tasks-view"><div class="section-heading"><div><p class="eyebrow">任务中心</p><h2>收集任务</h2><p class="page-help">完成进度按已确认反馈单位数计算，邮件和附件数量不重复计入进度。</p></div><button class="primary-button" id="new-task-2">＋ 新建任务</button></div><div class="task-summary-grid task-management-grid" id="task-summary-grid"><button type="button" class="task-summary-card" data-task-management-filter="all"><span>任务总数</span><strong id="task-total-count">0</strong><small>管理全部任务 →</small></button><button type="button" class="task-summary-card" data-task-management-filter="active"><span>进行中</span><strong id="task-active-count">0</strong><small>查看运行任务 →</small></button><button type="button" class="task-summary-card" data-task-management-filter="completed"><span>已完成</span><strong id="task-completed-count">0</strong><small>查看已完成任务 →</small></button><button type="button" class="task-summary-card" data-task-management-filter="deleted"><span>已删除</span><strong id="task-deleted-count">0</strong><small>查看可恢复任务 →</small></button></div><div class="active-task-heading"><div><p class="eyebrow">运行中的任务</p><h3>正在进行</h3></div><small>仅显示正在自动收件与匹配的任务</small></div><div class="task-list" id="task-list"></div><section class="panel task-feedback-panel" id="task-feedback-panel"><div class="panel-heading"><div><p class="eyebrow">具体任务反馈</p><h2>反馈状态与匹配邮件</h2></div><div class="task-feedback-actions"><select id="task-feedback-select" class="form-select" aria-label="选择收集任务"></select></div></div><div id="task-feedback-content"><div class="feedback-empty compact"><span>✓</span><strong>请选择任务</strong><p>任务的单位完成状态和匹配邮件会显示在这里。</p></div></div></section></section>
         <section class="view" id="inbox-view"><div class="section-heading"><div><p class="eyebrow">邮件中心</p><h2>收件箱</h2><p class="page-help">查看已同步的全部邮件，点击左侧邮件查看正文、抄送和附件。</p></div><div class="section-actions inbox-actions"><label class="inbox-since"><span>收件起始时间</span><input id="inbox-since" type="datetime-local" aria-label="收件起始时间" /><small>留空时默认收取近 7 天</small></label><button class="primary-button" id="sync-inbox" type="button">立即收件</button></div></div><div class="sync-progress-panel" id="inbox-sync-progress" hidden><div class="sync-progress-header"><strong id="inbox-sync-progress-text">正在准备收件…</strong><span id="inbox-sync-progress-count">已处理 0 封</span></div><div class="sync-progress-track"><i id="inbox-sync-progress-bar"></i></div></div><div class="inbox-layout panel"><aside class="inbox-list-pane"><div class="inbox-toolbar"><input class="inbox-search" id="inbox-search" type="search" placeholder="搜索发件人、主题或正文" autocomplete="off" /><div class="inbox-toolbar-actions"><span id="inbox-count">0 封邮件</span><select id="inbox-sort" aria-label="邮件排序"><option value="newest">最新</option><option value="oldest">最早</option></select></div></div><div class="inbox-list" id="inbox-list"></div></aside><section class="inbox-detail-pane" id="inbox-detail"><div class="inbox-empty-detail"><span>✉</span><h3>选择一封邮件</h3><p>左侧列表会显示已同步的收件箱邮件。</p></div></section></div></section>
         <section class="view" id="send-view">
-          <div class="section-heading"><div><p class="eyebrow">独立发送工作台 / 本地材料</p><h2>邮件发送</h2><p class="page-help">扫描材料目录，按通讯录自动匹配单位；每个单位生成一封独立邮件。</p></div><div class="section-actions"><button class="ghost-button" id="send-mailbox-link" type="button">去邮箱配置</button></div></div>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">独立发送工作台 / 本地材料</p>
+              <h2>邮件发送</h2>
+              <p class="page-help">扫描本地材料文件夹，自动按通讯录匹配单位归属；按单位生成独立邮件并支持点对点专属抄送。</p>
+            </div>
+            <div class="section-actions">
+              <button class="ghost-button" id="send-mailbox-link" type="button">⚙ 发信邮箱配置</button>
+            </div>
+          </div>
+
           <div class="send-workbench">
-            <section class="panel send-source-card"><div class="send-step"><b>01</b><div><p class="eyebrow">材料来源</p><h3>选择材料目录</h3></div><span class="send-source-count" id="send-scan-count">尚未扫描</span></div><div class="send-source-row"><input class="form-control" id="send-source-dir" placeholder="选择需要发送的材料文件夹" readonly /><button class="ghost-button" id="send-select-source" type="button">选择目录</button><button class="primary-button" id="send-scan" type="button">开始扫描</button></div><div class="send-options-row" style="display: flex; gap: 18px; margin: 8px 0 4px;"><label class="check-row send-zip-folders"><input id="send-zip-folders" type="checkbox" checked /> 文件夹自动识别并打包为 zip 附件</label><label class="check-row send-recursive"><input id="send-recursive" type="checkbox" checked /> 扫描子目录</label></div><div class="send-service-summary" id="send-service-summary">发信服务未配置，请先在邮箱配置中设置 SMTP。</div></section>
-            <section class="panel send-match-card"><div class="send-step"><b>02</b><div><p class="eyebrow">自动匹配</p><h3>确认材料归属</h3></div><span id="send-match-count">0 个文件</span></div><div class="send-match-toolbar"><input class="form-control" id="send-batch-name" placeholder="批次名称（可选）" /><select class="form-select" id="send-match-filter"><option value="all">全部状态</option><option value="matched">已匹配</option><option value="needs_review">待确认</option><option value="unmatched">未匹配</option><option value="ignored">已忽略</option></select></div><div class="send-match-list" id="send-match-list"><div class="send-empty">选择目录并扫描后，匹配结果会显示在这里。</div></div></section>
-            <section class="panel send-compose-card"><div class="send-step"><b>03</b><div><p class="eyebrow">邮件内容</p><h3>按单位预览</h3></div><span>支持 {单位名称}</span></div><div class="send-compose-grid"><div><label for="send-subject">邮件主题</label><input class="form-control" id="send-subject" placeholder="例如：材料报送通知 - {单位名称}" /><label for="send-body">邮件正文</label><textarea class="form-control send-body" id="send-body" rows="6" placeholder="支持 {单位名称} 占位符"></textarea><div class="send-signature-head"><label for="send-signature">邮件签名</label><button class="link-button" id="save-default-signature" type="button">保存为默认签名</button></div><textarea class="form-control send-signature" id="send-signature" rows="3">中国联通总部数据安全工作组</textarea><label for="send-cc">批次级抄送</label><input class="form-control" id="send-cc" placeholder="多个邮箱用逗号分隔" /><label for="send-test-recipient">测试收件邮箱</label><input class="form-control" id="send-test-recipient" type="email" placeholder="先发送到自己的邮箱验证" /></div><div class="send-preview"><div class="send-preview-head"><strong>邮件预览</strong><span id="send-preview-count">0 封</span></div><div id="send-preview-list"><div class="send-empty">完成匹配后显示按单位拆分的邮件。</div></div></div></div></section>
-            <section class="panel send-check-card"><div class="send-step"><b>04</b><div><p class="eyebrow">检查与发送</p><h3>安全发送</h3></div></div><div class="send-preflight" id="send-preflight"><strong>发送前检查</strong><p>请先扫描目录并处理所有待确认项。</p></div><div class="send-progress-panel" id="send-progress" hidden><div class="sync-progress-header"><strong id="send-progress-text">正在准备发送…</strong><span id="send-progress-count">已发送 0 / 0</span></div><div class="sync-progress-track"><i id="send-progress-bar"></i></div></div><div class="send-actions"><button class="ghost-button" id="send-run-check" type="button">启动检查</button><button class="ghost-button" id="send-test" type="button">发送测试</button><button class="primary-button" id="send-start" type="button">正式发送</button></div><div class="send-warning"><strong>安全提示</strong><p>系统按单位逐封发送，同单位附件合并；正式发送前必须完成测试并输入“确认发送”。</p></div></section>
-            <section class="panel send-history-card"><div class="send-step"><b>05</b><div><p class="eyebrow">发送记录</p><h3>历史批次</h3></div></div><div id="send-history-list"><div class="send-empty">暂无发送记录。</div></div></section>
+            <!-- Step 01: 材料来源 -->
+            <section class="panel send-card send-source-card">
+              <div class="send-step">
+                <b class="step-num">01</b>
+                <div class="step-meta">
+                  <p class="eyebrow">材料来源</p>
+                  <h3>选择材料目录</h3>
+                </div>
+                <span class="send-badge" id="send-scan-count">尚未扫描</span>
+              </div>
+              <div class="send-source-row">
+                <input class="form-control send-dir-input" id="send-source-dir" placeholder="请选择需要发送的材料所在文件夹" readonly />
+                <button class="ghost-button" id="send-select-source" type="button">📂 选择目录</button>
+                <button class="primary-button" id="send-scan" type="button">⚡ 开始扫描</button>
+              </div>
+              <div class="send-options-bar">
+                <div class="send-options-group">
+                  <label class="send-toggle-chip send-zip-folders">
+                    <input id="send-zip-folders" type="checkbox" checked />
+                    <span class="chip-label">📦 文件夹自动识别并打包为 zip 附件</span>
+                  </label>
+                  <label class="send-toggle-chip send-recursive">
+                    <input id="send-recursive" type="checkbox" checked />
+                    <span class="chip-label">📁 递归扫描子目录</span>
+                  </label>
+                </div>
+                <div class="send-service-summary" id="send-service-summary">
+                  <i class="service-dot"></i>发信服务未配置，请先在邮箱配置中设置 SMTP。
+                </div>
+              </div>
+            </section>
+
+            <!-- Step 02: 自动匹配与材料归属 -->
+            <section class="panel send-card send-match-card">
+              <div class="send-step">
+                <b class="step-num">02</b>
+                <div class="step-meta">
+                  <p class="eyebrow">自动匹配</p>
+                  <h3>确认材料归属</h3>
+                </div>
+                <span class="send-badge" id="send-match-count">0 个文件</span>
+              </div>
+              <div class="send-match-toolbar">
+                <div class="send-batch-input-wrap">
+                  <input class="form-control" id="send-batch-name" placeholder="批次名称（可选，留空将自动按时间生成）" />
+                </div>
+                <div class="send-filter-wrap">
+                  <label for="send-match-filter" class="filter-label">状态筛选：</label>
+                  <select class="form-select" id="send-match-filter">
+                    <option value="all">全部状态</option>
+                    <option value="matched">已匹配</option>
+                    <option value="needs_review">待确认</option>
+                    <option value="unmatched">未匹配</option>
+                    <option value="ignored">已忽略</option>
+                  </select>
+                </div>
+              </div>
+              <div class="send-match-table-head">
+                <span class="col-file">材料文件名称</span>
+                <span class="col-company">匹配归属单位</span>
+                <span class="col-state">状态</span>
+                <span class="col-detail">收件人与匹配说明</span>
+                <span class="col-action">操作</span>
+              </div>
+              <div class="send-match-list" id="send-match-list">
+                <div class="send-empty">选择目录并扫描后，匹配结果将整齐展示在此处。</div>
+              </div>
+            </section>
+
+            <!-- Step 03: 邮件内容与点对点预览 -->
+            <section class="panel send-card send-compose-card">
+              <div class="send-step">
+                <b class="step-num">03</b>
+                <div class="step-meta">
+                  <p class="eyebrow">邮件内容与点对点预览</p>
+                  <h3>编排正文与专属抄送</h3>
+                </div>
+                <span class="send-badge placeholder-badge">变量支持：{单位名称}</span>
+              </div>
+              <div class="send-compose-grid">
+                <!-- Left: 模版与全局配置 -->
+                <div class="send-compose-panel">
+                  <div class="compose-field">
+                    <div class="compose-field-header">
+                      <label for="send-subject">邮件主题</label>
+                      <button type="button" class="tag-helper-button" data-insert-placeholder="{单位名称}">+ 插入 {单位名称}</button>
+                    </div>
+                    <input class="form-control" id="send-subject" placeholder="例如：材料收集通知 - {单位名称}" />
+                  </div>
+                  <div class="compose-field">
+                    <label for="send-body">邮件正文</label>
+                    <textarea class="form-control send-body" id="send-body" rows="6" placeholder="输入邮件正文，支持 {单位名称} 自动替换为各单位全称"></textarea>
+                  </div>
+                  <div class="compose-field">
+                    <div class="send-signature-head">
+                      <label for="send-signature">邮件签名</label>
+                      <button class="link-button" id="save-default-signature" type="button">保存为默认签名</button>
+                    </div>
+                    <textarea class="form-control send-signature" id="send-signature" rows="2">中国联通总部数据安全工作组</textarea>
+                  </div>
+                  <div class="compose-subgrid">
+                    <div class="compose-field">
+                      <label for="send-cc">批次通用抄送 <small>（所有邮件通用）</small></label>
+                      <input class="form-control" id="send-cc" placeholder="多个邮箱用逗号分隔" />
+                    </div>
+                    <div class="compose-field">
+                      <label for="send-test-recipient">测试收件邮箱 <small>（验证效果）</small></label>
+                      <input class="form-control" id="send-test-recipient" type="email" placeholder="输入自己的邮箱测试验证" />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Right: 单位独立预览与独立抄送卡片 -->
+                <div class="send-preview-panel">
+                  <div class="send-preview-head">
+                    <div>
+                      <strong>单位独立邮件清单</strong>
+                      <small class="preview-subtext">每个单位独立发信，可在此微调单位专属抄送</small>
+                    </div>
+                    <span class="send-badge" id="send-preview-count">0 封</span>
+                  </div>
+                  <div class="send-preview-list" id="send-preview-list">
+                    <div class="send-empty">完成匹配后，这里将按单位整齐显示独立邮件与专属抄送。</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- Step 04: 检查与发送 -->
+            <section class="panel send-card send-check-card">
+              <div class="send-step">
+                <b class="step-num">04</b>
+                <div class="step-meta">
+                  <p class="eyebrow">安全与执行</p>
+                  <h3>检查与发送</h3>
+                </div>
+              </div>
+              <div class="send-preflight" id="send-preflight">
+                <strong>发送前检查</strong>
+                <p>请先扫描目录并确认所有待确认项。</p>
+              </div>
+              <div class="send-progress-panel" id="send-progress" hidden>
+                <div class="sync-progress-header">
+                  <strong id="send-progress-text">正在准备发送…</strong>
+                  <span id="send-progress-count">已发送 0 / 0</span>
+                </div>
+                <div class="sync-progress-track"><i id="send-progress-bar"></i></div>
+              </div>
+              <div class="send-actions-row">
+                <button class="ghost-button" id="send-run-check" type="button">🔍 检查就绪状态</button>
+                <button class="ghost-button test-send-btn" id="send-test" type="button">✉ ① 发送测试邮件</button>
+                <button class="primary-button formal-send-btn" id="send-start" type="button">🚀 ② 正式批量发送</button>
+              </div>
+              <div class="send-security-notice">
+                <span class="security-icon">🛡</span>
+                <p><strong>安全提示：</strong>点对点发送采用单联投递，各单位互不感知其他收件人；正式发送前请务必先测试，且发送前需要二次输入确认。</p>
+              </div>
+            </section>
+
+            <!-- Step 05: 发送记录 -->
+            <section class="panel send-card send-history-card">
+              <div class="send-step">
+                <b class="step-num">05</b>
+                <div class="step-meta">
+                  <p class="eyebrow">审计追踪</p>
+                  <h3>历史发送批次</h3>
+                </div>
+              </div>
+              <div class="send-history-wrap" id="send-history-list">
+                <div class="send-empty">暂无历史发送记录。</div>
+              </div>
+            </section>
           </div>
         </section>
         <section class="view" id="companies-view"><div class="section-heading"><div><p class="eyebrow">统一联系人数据</p><h2>通讯录</h2><p class="page-help">维护单位、联系人、邮箱、电话和单位别名；旧版单位清单模板继续兼容导入。</p></div><div class="section-actions"><input id="company-file" type="file" accept=".csv,.xlsx,.xls" hidden /><button class="primary-button" id="add-company-contact" type="button">＋ 新增联系人</button><button class="ghost-button" id="import-companies" type="button">⇧ 导入 Excel</button><button class="ghost-button" id="download-company-template" type="button">下载模板</button><button class="ghost-button table-delete" id="clear-all-companies" type="button" style="color: #f58a8a;">清空通讯录</button></div></div><div class="panel company-table-panel" id="company-list-panel"></div></section>

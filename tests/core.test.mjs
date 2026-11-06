@@ -114,19 +114,19 @@ test('builds an AI payload without attachment contents', () => {
 
 test('imports company email mappings from CSV-shaped rows', () => {
   assert.deepEqual(parseCompanyRows('单位名称,姓名,邮箱\n北桥公司,张三,a@example.com; b@example.com\n华东中心,李四,c@example.com'), [
-    { name: '北桥公司', contactName: '张三', emails: ['a@example.com', 'b@example.com'], phone: '', aliases: [] },
-    { name: '华东中心', contactName: '李四', emails: ['c@example.com'], phone: '', aliases: [] },
+    { name: '北桥公司', contactName: '张三', emails: ['a@example.com', 'b@example.com'], cc: [], phone: '', aliases: [] },
+    { name: '华东中心', contactName: '李四', emails: ['c@example.com'], cc: [], phone: '', aliases: [] },
   ]);
 });
 
 test('imports company names from an Excel-like worksheet matrix', () => {
   assert.deepEqual(parseCompanyMatrix([
-    ['单位名称', '姓名', '邮箱'],
-    ['北桥公司', '张三', 'a@example.com'],
-    ['华东中心', '李四', 'c@example.com'],
+    ['单位名称', '姓名', '邮箱', '抄送'],
+    ['北桥公司', '张三', 'a@example.com', 'cc1@example.com; cc2@example.com'],
+    ['华东中心', '李四', 'c@example.com', ''],
   ]), [
-    { name: '北桥公司', contactName: '张三', emails: ['a@example.com'], phone: '', aliases: [] },
-    { name: '华东中心', contactName: '李四', emails: ['c@example.com'], phone: '', aliases: [] },
+    { name: '北桥公司', contactName: '张三', emails: ['a@example.com'], cc: ['cc1@example.com', 'cc2@example.com'], phone: '', aliases: [] },
+    { name: '华东中心', contactName: '李四', emails: ['c@example.com'], cc: [], phone: '', aliases: [] },
   ]);
 });
 
@@ -525,13 +525,14 @@ test('intelligently matches filenames like 支付公司 and 智网科技 to full
 
 test('groups independent send batch attachments and validates unresolved items', () => {
   const items = [
-    { id: '1', fileName: 'a.xlsx', filePath: 'D:/a.xlsx', companyId: 'a', companyName: '北桥', recipients: ['a@example.com'], status: 'matched' },
-    { id: '2', fileName: 'b.pdf', filePath: 'D:/b.pdf', companyId: 'a', companyName: '北桥', recipients: ['a@example.com', 'b@example.com'], status: 'matched' },
-    { id: '3', fileName: 'c.txt', filePath: 'D:/c.txt', companyId: '', companyName: '', recipients: [], status: 'needs_review' },
+    { id: '1', fileName: 'a.xlsx', filePath: 'D:/a.xlsx', companyId: 'a', companyName: '北桥', recipients: ['a@example.com'], cc: ['cc1@example.com'], status: 'matched' },
+    { id: '2', fileName: 'b.pdf', filePath: 'D:/b.pdf', companyId: 'a', companyName: '北桥', recipients: ['a@example.com', 'b@example.com'], cc: ['cc2@example.com', 'cc1@example.com'], status: 'matched' },
+    { id: '3', fileName: 'c.txt', filePath: 'D:/c.txt', companyId: '', companyName: '', recipients: [], cc: [], status: 'needs_review' },
   ];
   const grouped = groupSendBatchItems(items);
   assert.equal(grouped.length, 1);
   assert.deepEqual(grouped[0].recipients, ['a@example.com', 'b@example.com']);
+  assert.deepEqual(grouped[0].cc, ['cc1@example.com', 'cc2@example.com']);
   assert.equal(grouped[0].attachments.length, 2);
   assert.equal(validateSendBatch(items, { subject: '通知', body: '正文' }).errors[0], '还有 1 个附件需要人工确认');
   assert.deepEqual(parseBatchCc('a@example.com; b@example.com，a@example.com'), ['a@example.com', 'b@example.com']);

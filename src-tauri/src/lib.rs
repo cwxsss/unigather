@@ -417,8 +417,8 @@ fn insert_send_batch_items(
         .map_err(|error| error.to_string())?;
     for item in items {
         transaction.execute(
-            "INSERT INTO send_batch_items (id,batch_id,file_name,file_path,company_id,company_name,recipients,match_method,confidence,status,error) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            rusqlite::params![item.id, batch_id, item.file_name, item.file_path, item.company_id, item.company_name, serde_json::to_string(&item.recipients).map_err(|error| error.to_string())?, item.match_method, item.confidence, item.status, item.error],
+            "INSERT INTO send_batch_items (id,batch_id,file_name,file_path,company_id,company_name,recipients,cc,match_method,confidence,status,error) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            rusqlite::params![item.id, batch_id, item.file_name, item.file_path, item.company_id, item.company_name, serde_json::to_string(&item.recipients).map_err(|error| error.to_string())?, serde_json::to_string(&item.cc).map_err(|error| error.to_string())?, item.match_method, item.confidence, item.status, item.error],
         ).map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -493,10 +493,11 @@ fn send_batch_items(
     state: State<'_, AppState>,
 ) -> Result<Vec<SendBatchItemInput>, String> {
     let connection = state.database.lock().map_err(|error| error.to_string())?;
-    let mut statement = connection.prepare("SELECT id,file_name,file_path,company_id,company_name,recipients,match_method,confidence,status,error FROM send_batch_items WHERE batch_id=?1 ORDER BY file_name").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT id,file_name,file_path,company_id,company_name,recipients,match_method,confidence,status,error,COALESCE(cc,'[]') FROM send_batch_items WHERE batch_id=?1 ORDER BY file_name").map_err(|error| error.to_string())?;
     let items = statement
         .query_map(rusqlite::params![batch_id], |row| {
             let recipients_json: String = row.get(5)?;
+            let cc_json: String = row.get(10)?;
             Ok(SendBatchItemInput {
                 id: row.get(0)?,
                 file_name: row.get(1)?,
@@ -504,6 +505,7 @@ fn send_batch_items(
                 company_id: row.get(3)?,
                 company_name: row.get(4)?,
                 recipients: serde_json::from_str(&recipients_json).unwrap_or_default(),
+                cc: serde_json::from_str(&cc_json).unwrap_or_default(),
                 match_method: row.get(6)?,
                 confidence: row.get(7)?,
                 status: row.get(8)?,
@@ -625,15 +627,17 @@ fn load_send_history_detail(
     ) in raw_runs
     {
         let mut item_statement = connection.prepare(
-            "SELECT company_name,recipients,attachments,status,COALESCE(error,''),COALESCE(sent_at,'') FROM send_items WHERE run_id=?1 ORDER BY company_name,id",
+            "SELECT company_name,recipients,attachments,status,COALESCE(error,''),COALESCE(sent_at,''),COALESCE(cc,'[]') FROM send_items WHERE run_id=?1 ORDER BY company_name,id",
         ).map_err(|query_error| query_error.to_string())?;
         let items = item_statement
             .query_map(rusqlite::params![id], |row| {
                 let recipients: String = row.get(1)?;
                 let attachments: String = row.get(2)?;
+                let cc: String = row.get(6)?;
                 Ok(SendHistoryItem {
                     company_name: row.get(0)?,
                     recipients: serde_json::from_str(&recipients).unwrap_or_default(),
+                    cc: serde_json::from_str(&cc).unwrap_or_default(),
                     attachments: serde_json::from_str(&attachments).unwrap_or_default(),
                     status: row.get(3)?,
                     error: row.get(4)?,
@@ -1081,6 +1085,7 @@ fn load_send_targets(
             company_id: company_id.clone(),
             company_name,
             recipients,
+            cc: Vec::new(),
             attachments,
         });
     }
@@ -1093,22 +1098,24 @@ fn load_batch_send_targets(
 ) -> Result<Vec<SendTarget>, String> {
     let mut grouped: HashMap<String, SendTarget> = HashMap::new();
     let mut statement = connection
-        .prepare("SELECT company_id,company_name,recipients,file_name,file_path,status FROM send_batch_items WHERE batch_id=?1 AND company_id <> '' AND status NOT IN ('needs_review','unmatched','ignored') ORDER BY company_name,file_name")
+        .prepare("SELECT company_id,company_name,recipients,file_name,file_path,status,COALESCE(cc,'[]') FROM send_batch_items WHERE batch_id=?1 AND company_id <> '' AND status NOT IN ('needs_review','unmatched','ignored') ORDER BY company_name,file_name")
         .map_err(|error| error.to_string())?;
     for row in statement
         .query_map(rusqlite::params![input.batch_id], |row| {
             let recipients_json: String = row.get(2)?;
+            let cc_json: String = row.get(6)?;
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 serde_json::from_str::<Vec<String>>(&recipients_json).unwrap_or_default(),
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                serde_json::from_str::<Vec<String>>(&cc_json).unwrap_or_default(),
             ))
         })
         .map_err(|error| error.to_string())?
     {
-        let (company_id, company_name, recipients, file_name, file_path) =
+        let (company_id, company_name, recipients, file_name, file_path, cc) =
             row.map_err(|error| error.to_string())?;
         let target = grouped
             .entry(company_id.clone())
@@ -1116,11 +1123,22 @@ fn load_batch_send_targets(
                 company_id: company_id.clone(),
                 company_name: company_name.clone(),
                 recipients: Vec::new(),
+                cc: Vec::new(),
                 attachments: Vec::new(),
             });
         for recipient in recipients {
-            if valid_email(&recipient) && !target.recipients.contains(&recipient) {
-                target.recipients.push(recipient);
+            let normalized = recipient.trim().to_ascii_lowercase();
+            if valid_email(&normalized) && !target.recipients.contains(&normalized) {
+                target.recipients.push(normalized);
+            }
+        }
+        for item in cc {
+            let normalized = item.trim().to_ascii_lowercase();
+            if valid_email(&normalized)
+                && !target.cc.contains(&normalized)
+                && !target.recipients.contains(&normalized)
+            {
+                target.cc.push(normalized);
             }
         }
         let path = PathBuf::from(&file_path);
@@ -1226,9 +1244,24 @@ fn execute_send(
             progress.current_company = target.company_name.clone();
             progress.message = format!("正在发送给 {}", target.company_name);
         });
+        let mut combined_cc = target.cc.clone();
+        for item in &input.cc {
+            let normalized = item.trim().to_ascii_lowercase();
+            if !normalized.is_empty()
+                && !combined_cc
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&normalized))
+                && !target
+                    .recipients
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(&normalized))
+            {
+                combined_cc.push(normalized);
+            }
+        }
         match client.send(
             &target,
-            &input.cc,
+            &combined_cc,
             &input.subject,
             &input.body,
             &input.signature,
@@ -1360,8 +1393,10 @@ fn start_send(
         }
         if let Some(first) = targets.first_mut() {
             first.recipients = vec![input.test_recipient.trim().to_ascii_lowercase()];
+            first.cc.clear();
             targets.truncate(1);
         }
+        input.cc.clear();
     }
     if targets.is_empty() {
         return Err("请至少选择一家发送单位".to_string());
@@ -1398,7 +1433,22 @@ fn start_send(
     let connection = state.database.lock().map_err(|error| error.to_string())?;
     connection.execute("INSERT INTO send_runs (id,task_id,batch_id,mode,started_at,status,total) VALUES (?1,?2,?3,?4,datetime('now'),'running',?5)", rusqlite::params![run_id, input.task_id, if input.batch_id.trim().is_empty() { None::<String> } else { Some(input.batch_id.clone()) }, if test_only { "test" } else { "formal" }, targets.len() as u32]).map_err(|error| error.to_string())?;
     for (index, target) in targets.iter().enumerate() {
-        connection.execute("INSERT INTO send_items (id,run_id,company_id,company_name,recipients,attachments) VALUES (?1,?2,?3,?4,?5,?6)", rusqlite::params![format!("send-item-{}-{}", chrono_like_id(), index), initial.run_id, target.company_id, target.company_name, serde_json::to_string(&target.recipients).map_err(|error| error.to_string())?, serde_json::to_string(&target.attachments.iter().map(|attachment| attachment.name.clone()).collect::<Vec<_>>()).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        let mut combined_cc = target.cc.clone();
+        for item in &input.cc {
+            let normalized = item.trim().to_ascii_lowercase();
+            if !normalized.is_empty()
+                && !combined_cc
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&normalized))
+                && !target
+                    .recipients
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(&normalized))
+            {
+                combined_cc.push(normalized);
+            }
+        }
+        connection.execute("INSERT INTO send_items (id,run_id,company_id,company_name,recipients,cc,attachments) VALUES (?1,?2,?3,?4,?5,?6,?7)", rusqlite::params![format!("send-item-{}-{}", chrono_like_id(), index), initial.run_id, target.company_id, target.company_name, serde_json::to_string(&target.recipients).map_err(|error| error.to_string())?, serde_json::to_string(&combined_cc).map_err(|error| error.to_string())?, serde_json::to_string(&target.attachments.iter().map(|attachment| attachment.name.clone()).collect::<Vec<_>>()).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
     }
     drop(connection);
     let sends = state.sends.clone();
@@ -3853,6 +3903,7 @@ mod tests {
             company_id: "company".into(),
             company_name: "单位".into(),
             recipients: vec!["a@example.com".into()],
+            cc: Vec::new(),
             match_method: "manual".into(),
             confidence: 1.0,
             status: "matched".into(),
@@ -4255,6 +4306,56 @@ mod tests {
         assert_eq!(targets[0].attachments.len(), 2);
         assert!(targets[0].attachments.iter().any(|a| a.name == "sub.zip"));
         assert!(targets[0].attachments.iter().any(|a| a.name == "file.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_batch_send_targets_loads_unit_specific_cc() {
+        let connection = Connection::open_in_memory().expect("database");
+        crate::db::initialize(&connection).expect("schema");
+        let dir =
+            std::env::temp_dir().join(format!("unigather-cc-test-{}", next_unique_id("test")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("bj.xlsx");
+        std::fs::write(&file_path, b"content").unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO send_batches (id,name,source_dir,recursive,subject,body,signature,cc,status,created_at,updated_at) VALUES ('b2','批次','.','1','主题','正文','','[]','ready','now','now')",
+                [],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO send_batch_items (id,batch_id,file_name,file_path,company_id,company_name,recipients,cc,match_method,confidence,status,error) VALUES ('i1','b2','bj.xlsx',?1,'c1','北京分公司','[\"bj@example.com\"]','[\"cc1@example.com\",\"bj@example.com\",\"cc2@example.com\"]','name_exact',0.98,'matched','')",
+                rusqlite::params![file_path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+
+        let input = SendInput {
+            task_id: String::new(),
+            batch_id: "b2".into(),
+            smtp_host: String::new(),
+            smtp_port: 0,
+            encryption: String::new(),
+            username: String::new(),
+            sender_name: String::new(),
+            subject: "主题".into(),
+            body: "正文".into(),
+            signature: String::new(),
+            include_attachments: true,
+            company_ids: vec!["c1".into()],
+            cc: Vec::new(),
+            test_recipient: String::new(),
+        };
+
+        let targets = super::load_batch_send_targets(&connection, &input).expect("targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].recipients, vec!["bj@example.com"]);
+        // Notice: bj@example.com is in recipients so it was filtered out of CC, leaving cc1 and cc2
+        assert_eq!(targets[0].cc, vec!["cc1@example.com", "cc2@example.com"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

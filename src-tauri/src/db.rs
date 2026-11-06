@@ -69,6 +69,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS send_items (
           id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES send_runs(id) ON DELETE CASCADE,
           company_id TEXT NOT NULL, company_name TEXT NOT NULL, recipients TEXT NOT NULL,
+          cc TEXT NOT NULL DEFAULT '[]',
           attachments TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'pending',
           error TEXT, sent_at TEXT
         );
@@ -83,6 +84,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
           id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES send_batches(id) ON DELETE CASCADE,
           file_name TEXT NOT NULL, file_path TEXT NOT NULL, company_id TEXT NOT NULL DEFAULT '',
           company_name TEXT NOT NULL DEFAULT '', recipients TEXT NOT NULL DEFAULT '[]',
+          cc TEXT NOT NULL DEFAULT '[]',
           match_method TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0,
           status TEXT NOT NULL DEFAULT 'unmatched', error TEXT NOT NULL DEFAULT ''
         );
@@ -158,6 +160,8 @@ pub fn initialize(connection: &Connection) -> Result<()> {
     }
     for (table, column, definition) in [
         ("send_batches", "signature", "TEXT NOT NULL DEFAULT ''"),
+        ("send_batch_items", "cc", "TEXT NOT NULL DEFAULT '[]'"),
+        ("send_items", "cc", "TEXT NOT NULL DEFAULT '[]'"),
         ("send_runs", "mode", "TEXT NOT NULL DEFAULT 'unknown'"),
         ("sync_runs", "task_id", "TEXT"),
         ("sync_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),

@@ -32,6 +32,7 @@ pub struct SendTarget {
     pub company_id: String,
     pub company_name: String,
     pub recipients: Vec<String>,
+    pub cc: Vec<String>,
     pub attachments: Vec<SendAttachment>,
 }
 

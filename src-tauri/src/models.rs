@@ -260,6 +260,8 @@ pub struct SendBatchItemInput {
     #[serde(default)]
     pub recipients: Vec<String>,
     #[serde(default)]
+    pub cc: Vec<String>,
+    #[serde(default)]
     pub match_method: String,
     #[serde(default)]
     pub confidence: f32,
@@ -294,6 +296,8 @@ pub struct SendBatchSummary {
 pub struct SendHistoryItem {
     pub company_name: String,
     pub recipients: Vec<String>,
+    #[serde(default)]
+    pub cc: Vec<String>,
     pub attachments: Vec<String>,
     pub status: String,
     pub error: String,

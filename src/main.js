@@ -29,7 +29,7 @@ const MATERIAL_PATH_STORAGE_KEY = 'unigather.material-path.v1';
 const AI_CONFIG_STORAGE_KEY = 'unigather.ai-config.v1';
 const TASK_SYNC_STORAGE_KEY = 'unigather.task-sync-times.v1';
 const TASK_LAST_RECEIVE_STORAGE_KEY = 'unigather.task-last-receive.v1';
-const APP_VERSION = '0.1.3';
+const APP_VERSION = '0.1.4';
 const RELEASES_ENDPOINT = 'https://api.github.com/repos/cwxsss/unigather/releases/latest';
 let tasks = [];
 let deletedTasks = [];
@@ -1029,7 +1029,31 @@ async function persistSendBatch() {
   const values = collectSendValues();
   sendBatch.name = document.querySelector('#send-batch-name')?.value.trim() || `材料发送 ${new Date().toLocaleString('zh-CN')}`;
   sendBatch.subject = values.subject; sendBatch.body = values.body; sendBatch.signature = values.signature; sendBatch.cc = values.cc;
-  const summary = await invokeCommand('send_batch_save', { batchId: sendBatch.id, input: { name: sendBatch.name, sourceDir: sendBatch.sourceDir, recursive: sendBatch.recursive, subject: sendBatch.subject, body: sendBatch.body, signature: sendBatch.signature, cc: sendBatch.cc }, items: sendBatch.items.map((item) => ({ id: item.id, fileName: item.fileName, filePath: item.filePath, companyId: item.companyId, companyName: item.companyName, recipients: item.recipients, matchMethod: item.matchMethod, confidence: item.confidence, status: item.status, error: item.error })) });
+  const summary = await invokeCommand('send_batch_save', {
+    batchId: sendBatch.id,
+    input: {
+      name: sendBatch.name,
+      sourceDir: sendBatch.sourceDir,
+      recursive: sendBatch.recursive,
+      subject: sendBatch.subject,
+      body: sendBatch.body,
+      signature: sendBatch.signature,
+      cc: sendBatch.cc
+    },
+    items: sendBatch.items.map((item) => ({
+      id: item.id,
+      fileName: item.fileName,
+      filePath: item.filePath,
+      companyId: item.companyId,
+      companyName: item.companyName,
+      recipients: item.recipients,
+      cc: item.cc ?? [],
+      matchMethod: item.matchMethod,
+      confidence: item.confidence,
+      status: item.status,
+      error: item.error
+    }))
+  });
   const persistence = validateBatchPersistence(sendBatch.items, summary);
   if (!persistence.ok) throw new Error(persistence.message);
   sendBatch.id = summary.id;
@@ -1062,29 +1086,136 @@ function renderSendMatchList() {
   const items = sendBatch.items.filter((item) => filter === 'all' || item.status === filter);
   document.querySelector('#send-match-count').textContent = `${sendBatch.items.length} 个文件 · 待确认 ${sendBatch.items.filter((item) => item.status === 'needs_review' || item.status === 'unmatched').length}`;
   list.replaceChildren();
-  if (!items.length) { list.innerHTML = '<div class="send-empty">当前筛选没有材料。</div>'; return; }
+  if (!items.length) { list.innerHTML = '<div class="send-empty">当前筛选条件没有对应材料。</div>'; return; }
   const options = getSendCompanyOptions();
   items.forEach((item) => {
     const row = document.createElement('div'); row.className = `send-match-row status-${item.status}`;
-    const info = document.createElement('div'); info.className = 'send-match-file'; info.innerHTML = `<strong>${escapeHtml(item.fileName)}</strong><small>${escapeHtml(formatMatchMethod(item.matchMethod) || '未匹配')} · ${Math.round((item.confidence || 0) * 100)}%</small>`;
-    const select = document.createElement('select'); select.className = 'form-select'; select.innerHTML = '<option value="">选择单位</option>' + options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === item.companyId ? 'selected' : ''}>${escapeHtml(option.name)}</option>`).join('');
-    select.addEventListener('change', async () => { const option = options.find((candidate) => candidate.id === select.value); item.companyId = option?.id ?? ''; item.companyName = option?.name ?? ''; item.recipients = option?.emails ?? []; item.status = option?.emails?.length ? 'matched' : 'needs_review'; item.matchMethod = 'manual'; item.confidence = 1; item.error = option?.emails?.length ? '' : '单位没有有效邮箱'; renderSendWorkbench(); if (sendBatch.id) { try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId, decision: item.status }); } catch {} } });
+    const info = document.createElement('div'); info.className = 'send-match-file';
+    info.innerHTML = `<strong>${escapeHtml(item.fileName)}</strong><small>${escapeHtml(formatMatchMethod(item.matchMethod) || '未匹配')} · 置信度 ${Math.round((item.confidence || 0) * 100)}%</small>`;
+    info.title = item.filePath || item.fileName;
+
+    const select = document.createElement('select'); select.className = 'form-select';
+    select.innerHTML = '<option value="">选择单位</option>' + options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === item.companyId ? 'selected' : ''}>${escapeHtml(option.name)}</option>`).join('');
+    select.addEventListener('change', async () => {
+      const option = options.find((candidate) => candidate.id === select.value);
+      item.companyId = option?.id ?? '';
+      item.companyName = option?.name ?? '';
+      item.recipients = option?.emails ?? [];
+      item.cc = option?.cc ?? item.cc ?? [];
+      item.status = option?.emails?.length ? 'matched' : 'needs_review';
+      item.matchMethod = 'manual';
+      item.confidence = 1;
+      item.error = option?.emails?.length ? '' : '单位没有有效邮箱';
+      renderSendWorkbench();
+      if (sendBatch.id) {
+        try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId, decision: item.status }); } catch {}
+      }
+    });
+
     const meta = sendItemStatusMeta(item.status, item.error);
-    const status = document.createElement('div'); status.className = 'send-match-state'; status.innerHTML = `<span class="send-state-chip ${meta.tone}">${meta.label}</span><span class="send-match-detail">${escapeHtml(item.status === 'matched' ? `${item.companyName} · ${item.recipients.join('、')} · ${meta.detail}` : meta.detail)}</span>`;
-    const ignore = document.createElement('button'); ignore.type = 'button'; ignore.className = 'ghost-button send-ignore-button'; ignore.textContent = item.status === 'ignored' ? '恢复' : '忽略'; ignore.addEventListener('click', async () => { item.status = item.status === 'ignored' ? (item.companyId && item.recipients.length ? 'matched' : 'needs_review') : 'ignored'; item.error = item.status === 'ignored' ? '已忽略' : ''; renderSendWorkbench(); if (sendBatch.id) { try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId || null, decision: item.status }); } catch {} } });
-    row.append(info, select, status, ignore); list.append(row);
+    const stateCol = document.createElement('div'); stateCol.className = 'send-match-state';
+    stateCol.innerHTML = `<span class="send-state-chip ${meta.tone}">${meta.label}</span>`;
+
+    const detailCol = document.createElement('div'); detailCol.className = 'send-match-detail-col';
+    const ccHint = item.cc?.length ? ` · 抄送: ${item.cc.join(', ')}` : '';
+    detailCol.textContent = item.status === 'matched' ? `${item.companyName} · ${item.recipients.join('、')}${ccHint} · ${meta.detail}` : meta.detail;
+    detailCol.title = detailCol.textContent;
+
+    const ignore = document.createElement('button'); ignore.type = 'button';
+    ignore.className = 'ghost-button send-ignore-button';
+    ignore.textContent = item.status === 'ignored' ? '恢复' : '忽略';
+    ignore.addEventListener('click', async () => {
+      item.status = item.status === 'ignored' ? (item.companyId && item.recipients.length ? 'matched' : 'needs_review') : 'ignored';
+      item.error = item.status === 'ignored' ? '已忽略' : '';
+      renderSendWorkbench();
+      if (sendBatch.id) {
+        try { await invokeCommand('send_batch_resolve', { batchId: sendBatch.id, itemId: item.id, companyId: item.companyId || null, decision: item.status }); } catch {}
+      }
+    });
+
+    row.append(info, select, stateCol, detailCol, ignore);
+    list.append(row);
   });
 }
 
 function renderSendPreview() {
   const node = document.querySelector('#send-preview-list'); if (!node) return;
-  const groups = groupSendBatchItems(sendBatch.items); document.querySelector('#send-preview-count').textContent = `${groups.length} 封`;
+  const groups = groupSendBatchItems(sendBatch.items);
+  document.querySelector('#send-preview-count').textContent = `${groups.length} 封`;
   const values = collectSendValues();
-  node.replaceChildren(); if (!groups.length) { node.innerHTML = '<div class="send-empty">完成匹配后显示按单位拆分的邮件。</div>'; return; }
-  groups.forEach((group) => { const item = document.createElement('article'); item.className = 'send-preview-item'; const previewBody = composeSendBody(values.body, values.signature).replaceAll('{单位名称}', group.companyName); item.innerHTML = `<strong>${escapeHtml(group.companyName)}</strong><small>To：${escapeHtml(group.recipients.join('、'))}</small><span>${group.attachments.length} 个附件 · ${escapeHtml(previewBody.slice(-60))}</span>`; node.append(item); });
+  node.replaceChildren();
+  if (!groups.length) {
+    node.innerHTML = '<div class="send-empty">完成匹配后，这里将按单位整齐显示独立邮件与专属抄送。</div>';
+    return;
+  }
+  groups.forEach((group) => {
+    const card = document.createElement('article');
+    card.className = 'send-preview-card';
+    const previewBody = composeSendBody(values.body, values.signature).replaceAll('{单位名称}', group.companyName);
+
+    const head = document.createElement('div');
+    head.className = 'send-preview-card-head';
+    head.innerHTML = `<strong>🏢 ${escapeHtml(group.companyName)}</strong><span class="preview-attach-badge">📎 ${group.attachments.length} 个附件</span>`;
+
+    const toRow = document.createElement('div');
+    toRow.className = 'send-preview-field send-preview-to-row';
+    toRow.innerHTML = `<span class="preview-field-label">收件人 (To)：</span><span class="preview-field-value to-emails">${escapeHtml(group.recipients.join('、') || '暂无收件邮箱')}</span>`;
+
+    const ccRow = document.createElement('div');
+    ccRow.className = 'send-preview-field send-preview-cc-row';
+    const ccLabel = document.createElement('label');
+    ccLabel.className = 'preview-field-label';
+    ccLabel.textContent = '专属抄送 (Cc)：';
+    ccLabel.htmlFor = `unit-cc-${group.companyId}`;
+
+    const ccInput = document.createElement('input');
+    ccInput.id = `unit-cc-${group.companyId}`;
+    ccInput.className = 'form-control send-unit-cc-input';
+    ccInput.placeholder = '输入该单位专属抄送邮箱（多个用逗号/分号分隔）';
+    ccInput.value = group.cc?.length ? group.cc.join(', ') : '';
+    ccInput.addEventListener('change', async () => {
+      const newCc = parseBatchCc(ccInput.value);
+      group.cc = newCc;
+      sendBatch.items.forEach((item) => {
+        if (item.companyId === group.companyId) {
+          item.cc = newCc;
+        }
+      });
+      if (sendBatch.id) {
+        try {
+          await persistSendBatch();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    });
+    ccRow.append(ccLabel, ccInput);
+
+    const attachRow = document.createElement('div');
+    attachRow.className = 'send-preview-attach-row';
+    attachRow.innerHTML = group.attachments.map((att) => `<span class="preview-attach-chip" title="${escapeHtml(att.path)}">📄 ${escapeHtml(att.name)}</span>`).join('');
+
+    const bodySnippet = document.createElement('div');
+    bodySnippet.className = 'send-preview-body-snippet';
+    bodySnippet.textContent = previewBody.length > 130 ? `${previewBody.slice(0, 130)}…` : previewBody;
+
+    card.append(head, toRow, ccRow, attachRow, bodySnippet);
+    node.append(card);
+  });
 }
 
-function renderSendWorkbench() { const mailbox = collectMailboxValues(); const service = document.querySelector('#send-service-summary'); if (service) service.textContent = mailbox.smtpHost ? `发信服务：${mailbox.smtpHost}:${mailbox.smtpPort || 465} · ${mailbox.smtpEncryption || 'SSL/TLS'} · 账号 ${mailbox.username || '未填写'}` : '发信服务未配置，请先在邮箱配置中设置 SMTP。'; renderSendMatchList(); renderSendPreview(); renderSendPreflight(); }
+function renderSendWorkbench() {
+  const mailbox = collectMailboxValues();
+  const service = document.querySelector('#send-service-summary');
+  if (service) {
+    service.innerHTML = mailbox.smtpHost
+      ? `<i class="service-dot"></i>发信服务：${escapeHtml(mailbox.smtpHost)}:${mailbox.smtpPort || 465} · ${escapeHtml(mailbox.smtpEncryption || 'SSL/TLS')} · 账号 ${escapeHtml(mailbox.username || '未填写')}`
+      : '<i class="service-dot" style="background:#f06a6a;box-shadow:none"></i>发信服务未配置，请先在邮箱配置中设置 SMTP。';
+  }
+  renderSendMatchList();
+  renderSendPreview();
+  renderSendPreflight();
+}
 
 async function openSendHistoryDetail(batchId) {
   const modal = document.querySelector('#send-history-detail-modal'); const content = document.querySelector('#send-history-detail-content');
@@ -1093,12 +1224,39 @@ async function openSendHistoryDetail(batchId) {
   try {
     const detail = await invokeCommand('send_history_detail', { batchId }); const batch = detail.batch;
     document.querySelector('#send-history-detail-title').textContent = batch.name || '发送批次';
-    const runs = (detail.runs ?? []).map((run) => `<section class="send-run"><div class="send-run-head"><strong>${run.mode === 'test' ? '测试发送' : run.mode === 'formal' ? '正式发送' : '历史发送'} · ${escapeHtml(run.startedAt)}</strong><span class="send-state-chip ${run.failureCount ? 'danger' : 'success'}">${escapeHtml(run.status)} · 成功 ${run.successCount} / 失败 ${run.failureCount}</span></div>${(run.items ?? []).map((item) => `<div class="send-run-item"><strong>${escapeHtml(item.companyName)}</strong><span>${escapeHtml(item.recipients.join('、'))}</span><span>${escapeHtml(item.status)}</span><small>${escapeHtml(item.error || item.sentAt || '')}</small></div>`).join('') || '<div class="send-empty">没有逐单位明细。</div>'}</section>`).join('');
+    const runs = (detail.runs ?? []).map((run) => `<section class="send-run"><div class="send-run-head"><strong>${run.mode === 'test' ? '测试发送' : run.mode === 'formal' ? '正式发送' : '历史发送'} · ${escapeHtml(run.startedAt)}</strong><span class="send-state-chip ${run.failureCount ? 'danger' : 'success'}">${escapeHtml(run.status)} · 成功 ${run.successCount} / 失败 ${run.failureCount}</span></div>${(run.items ?? []).map((item) => `<div class="send-run-item"><strong>${escapeHtml(item.companyName)}</strong><span>收件：${escapeHtml(item.recipients.join('、'))}${item.cc?.length ? `<br><small style="color:var(--cyan)">专属抄送：${escapeHtml(item.cc.join('、'))}</small>` : ''}</span><span class="send-state-chip ${item.status === 'success' ? 'success' : 'danger'}">${escapeHtml(item.status === 'success' ? '已发送' : '失败')}</span><small>${escapeHtml(item.error || item.sentAt || '')}</small></div>`).join('') || '<div class="send-empty">没有逐单位明细。</div>'}</section>`).join('');
     content.innerHTML = `<div class="send-history-meta"><div><small>材料目录</small><strong>${escapeHtml(batch.sourceDir)}</strong></div><div><small>附件数量</small><strong>${batch.itemCount}</strong></div><div><small>邮件主题</small><strong>${escapeHtml(batch.subject)}</strong></div><div><small>邮件签名</small><strong>${escapeHtml(batch.signature || '未设置')}</strong></div></div>${runs || '<div class="send-empty">该批次尚未发送。</div>'}`;
   } catch (error) { content.innerHTML = `<div class="send-empty">读取历史详情失败：${escapeHtml(error.message ?? error)}</div>`; }
 }
 
-async function loadSendHistory() { try { sendBatchHistory = await invokeCommand('send_history', {}); } catch { sendBatchHistory = []; } const node = document.querySelector('#send-history-list'); if (!node) return; node.replaceChildren(); if (!sendBatchHistory.length) { node.innerHTML = '<div class="send-empty">暂无发送记录。</div>'; return; } sendBatchHistory.forEach((run) => { const row = document.createElement('div'); row.className = 'send-history-row'; row.tabIndex = 0; const info = document.createElement('span'); info.innerHTML = `<strong>${escapeHtml(run.name || run.id || '发送批次')}</strong><small>${escapeHtml(run.status || '')} · ${escapeHtml(run.updatedAt || run.updated_at || '')} · ${run.itemCount ?? 0} 个附件</small>`; row.append(info); const detail = document.createElement('button'); detail.className = 'ghost-button'; detail.type = 'button'; detail.textContent = '查看详情'; detail.addEventListener('click', (event) => { event.stopPropagation(); void openSendHistoryDetail(run.id); }); row.append(detail); row.addEventListener('click', () => void openSendHistoryDetail(run.id)); if (run.failedCount > 0 && run.lastRunId) { const retry = document.createElement('button'); retry.className = 'ghost-button'; retry.type = 'button'; retry.textContent = `重试失败项（${run.failedCount}）`; retry.addEventListener('click', async (event) => { event.stopPropagation(); try { const progress = await invokeCommand('send_retry', { runId: run.lastRunId, mailbox: collectSendMailbox() }); activeSendRunId = progress.runId; updateSendProgress(progress); void pollSendStatus(); notify('已启动失败项重试。', 'success'); } catch (error) { notify(`重试失败：${error.message ?? error}`, 'error'); } }); row.append(retry); } node.append(row); }); }
+async function loadSendHistory() {
+  try { sendBatchHistory = await invokeCommand('send_history', {}); } catch { sendBatchHistory = []; }
+  const node = document.querySelector('#send-history-list'); if (!node) return;
+  node.replaceChildren();
+  if (!sendBatchHistory.length) { node.innerHTML = '<div class="send-empty">暂无发送记录。</div>'; return; }
+  sendBatchHistory.forEach((run) => {
+    const row = document.createElement('div'); row.className = 'send-history-row'; row.tabIndex = 0;
+    const info = document.createElement('span');
+    info.innerHTML = `<strong>${escapeHtml(run.name || run.id || '发送批次')}</strong><small>${escapeHtml(run.status || '')} · ${escapeHtml(run.updatedAt || run.updated_at || '')} · ${run.itemCount ?? 0} 个附件</small>`;
+    row.append(info);
+    const detail = document.createElement('button'); detail.className = 'ghost-button'; detail.type = 'button'; detail.textContent = '查看详情';
+    detail.addEventListener('click', (event) => { event.stopPropagation(); void openSendHistoryDetail(run.id); });
+    row.append(detail);
+    row.addEventListener('click', () => void openSendHistoryDetail(run.id));
+    if (run.failedCount > 0 && run.lastRunId) {
+      const retry = document.createElement('button'); retry.className = 'ghost-button'; retry.type = 'button'; retry.textContent = `重试失败项（${run.failedCount}）`;
+      retry.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        try {
+          const progress = await invokeCommand('send_retry', { runId: run.lastRunId, mailbox: collectSendMailbox() });
+          activeSendRunId = progress.runId; updateSendProgress(progress); void pollSendStatus(); notify('已启动失败项重试。', 'success');
+        } catch (error) { notify(`重试失败：${error.message ?? error}`, 'error'); }
+      });
+      row.append(retry);
+    }
+    node.append(row);
+  });
+}
 
 async function initSendModule() {
   const dir = document.querySelector('#send-source-dir');
@@ -1106,6 +1264,16 @@ async function initSendModule() {
   document.querySelector('#send-select-source')?.addEventListener('click', async () => { try { const { open } = await import('@tauri-apps/plugin-dialog'); const selected = await open({ directory: true, multiple: false }); if (typeof selected === 'string') dir.value = selected; } catch { const selected = window.prompt('请输入材料目录路径'); if (selected) dir.value = selected; } });
   document.querySelector('#send-scan')?.addEventListener('click', async () => { const sourceDir = dir?.value.trim(); if (!sourceDir) { notify('请先选择材料目录', 'error'); return; } const button = document.querySelector('#send-scan'); button.disabled = true; button.textContent = '扫描中…'; try { const recursive = document.querySelector('#send-recursive')?.checked ?? true; const zipFolders = document.querySelector('#send-zip-folders')?.checked ?? true; const files = await invokeCommand('send_batch_scan', { sourceDir, recursive, zipFolders }); sendBatch = { ...sendBatch, sourceDir, recursive, files, items: buildSendBatchItems(files, getSendCompanyOptions()), id: '' }; document.querySelector('#send-scan-count').textContent = `发现 ${files.length} 个文件`; renderSendWorkbench(); await persistSendBatch(); notify(`扫描完成：发现 ${files.length} 个可发送文件`, 'success'); } catch (error) { notify(`扫描失败：${error.message ?? error}`, 'error'); } finally { button.disabled = false; button.textContent = '开始扫描'; } });
   ['send-subject','send-body','send-signature','send-cc','send-test-recipient','send-batch-name'].forEach((id) => document.querySelector(`#${id}`)?.addEventListener('input', () => { sendTestConfirmed = false; renderSendWorkbench(); }));
+  document.querySelector('[data-insert-placeholder="{单位名称}"]')?.addEventListener('click', () => {
+    const input = document.querySelector('#send-subject');
+    if (input) {
+      if (!input.value.includes('{单位名称}')) {
+        input.value = input.value.trim() ? `${input.value} - {单位名称}` : '材料收集通知 - {单位名称}';
+      }
+      input.focus();
+      renderSendWorkbench();
+    }
+  });
   document.querySelector('#save-default-signature')?.addEventListener('click', async () => { try { await invokeCommand('mail_signature_save', { signature: document.querySelector('#send-signature')?.value ?? '' }); notify('默认邮件签名已保存。', 'success'); } catch (error) { notify(`保存签名失败：${error.message ?? error}`, 'error'); } });
   document.querySelector('#send-match-filter')?.addEventListener('change', renderSendMatchList);
   document.querySelector('#send-run-check')?.addEventListener('click', () => { const result = validateSendBatch(sendBatch.items, collectSendValues()); renderSendPreflight(result.errors[0] || (result.warnings[0] ?? '检查通过，可以先发送测试邮件。')); notify(result.errors[0] || '检查完成', result.errors[0] ? 'error' : 'success'); });

@@ -248,16 +248,18 @@ export function matchAttachment(file, options = []) {
     }
     return fileResult ? { option, ...fileResult } : null;
   }).filter(Boolean).sort((left, right) => right.score - left.score);
-  if (!candidates.length) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], matchMethod: '', confidence: 0, status: 'unmatched', error: '未找到对应单位' };
+  if (!candidates.length) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], cc: [], matchMethod: '', confidence: 0, status: 'unmatched', error: '未找到对应单位' };
   const best = candidates[0];
   const tied = candidates.filter((candidate) => {
     if (best.isFull && !candidate.isFull) return false;
     return Math.abs(candidate.score - best.score) < 0.03;
   });
-  if (tied.length > 1) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], matchMethod: 'ambiguous', confidence: best.score, status: 'needs_review', error: `候选单位：${tied.map((candidate) => candidate.option.name).join('、')}` };
+  if (tied.length > 1) return { id: file.id, fileName: file.name, filePath: file.path, companyId: '', companyName: '', recipients: [], cc: [], matchMethod: 'ambiguous', confidence: best.score, status: 'needs_review', error: `候选单位：${tied.map((candidate) => candidate.option.name).join('、')}` };
   const option = best.option;
   const recipients = emails(option);
-  return { id: file.id, fileName: file.name, filePath: file.path, companyId: String(option.id), companyName: String(option.name ?? ''), recipients, matchMethod: best.method, confidence: best.score, status: recipients.length ? 'matched' : 'needs_review', error: recipients.length ? '' : '单位没有有效邮箱' };
+  const rawCc = option.cc ?? option.ccEmails ?? '';
+  const cc = Array.isArray(rawCc) ? rawCc : parseBatchCc(rawCc);
+  return { id: file.id, fileName: file.name, filePath: file.path, companyId: String(option.id), companyName: String(option.name ?? ''), recipients, cc, matchMethod: best.method, confidence: best.score, status: recipients.length ? 'matched' : 'needs_review', error: recipients.length ? '' : '单位没有有效邮箱' };
 }
 
 export function buildSendBatchItems(files = [], options = []) {
@@ -267,8 +269,9 @@ export function buildSendBatchItems(files = [], options = []) {
 export function groupSendBatchItems(items = []) {
   const grouped = new Map();
   items.filter((item) => item.status === 'matched' && item.companyId).forEach((item) => {
-    const current = grouped.get(item.companyId) ?? { companyId: item.companyId, companyName: item.companyName, recipients: [], attachments: [], statuses: [] };
+    const current = grouped.get(item.companyId) ?? { companyId: item.companyId, companyName: item.companyName, recipients: [], cc: [], attachments: [], statuses: [] };
     current.recipients = [...new Set([...current.recipients, ...(item.recipients ?? [])])];
+    current.cc = [...new Set([...current.cc, ...(item.cc ?? [])])];
     current.attachments.push({ name: item.fileName, path: item.filePath, id: item.id });
     current.statuses.push(item.status);
     grouped.set(item.companyId, current);
